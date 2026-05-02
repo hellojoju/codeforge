@@ -51,7 +51,7 @@ class TaskDecomposer:
                     work_id=wu_id,
                     work_type="development",
                     title=sub["title"],
-                    target=sub["description"],
+                    target=sub["description"] or sub["title"],
                     status=WorkUnitStatus.DRAFT,
                     expected_output=sub.get("expected_output", ""),
                     acceptance_criteria=sub.get("acceptance_criteria", []),
@@ -120,7 +120,7 @@ class TaskDecomposer:
 
         return [{
             "title": name,
-            "description": description,
+            "description": description or name,
             "scope": [name.lower().replace(" ", "_")],
             "acceptance_criteria": [f"验收: {description}"],
             "producer_role": matched_role,
