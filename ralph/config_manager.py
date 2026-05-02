@@ -329,3 +329,102 @@ class RalphConfigManager:
                 except _json.JSONDecodeError:
                     continue
         return events[-limit:]
+
+    # --- Provider Proxy & Cost Tracking ---
+
+    def proxy_request(self, provider_id: str, endpoint: str, body: dict) -> dict:
+        """通过后端代理转发请求到 LLM Provider（前端不走 Provider API）。"""
+        provider = self.get_provider(provider_id)
+        if not provider:
+            return {"ok": False, "error": "Provider not found"}
+
+        import urllib.request
+        import json as _json
+
+        base_url = provider.get("base_url", "").rstrip("/")
+        api_key = provider.get("api_key", "")
+        url = f"{base_url}/{endpoint.lstrip('/')}"
+
+        req = urllib.request.Request(url, method="POST")
+        req.add_header("Content-Type", "application/json")
+        if api_key:
+            req.add_header("Authorization", f"Bearer {api_key}")
+        req.data = _json.dumps(body).encode()
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                response_data = _json.loads(resp.read().decode())
+            # 记录 token 用量
+            usage = response_data.get("usage", {})
+            self._record_usage(provider_id, usage)
+            return {"ok": True, "data": response_data}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _record_usage(self, provider_id: str, usage: dict) -> None:
+        """记录一次 API 调用的 token 用量。"""
+        try:
+            log = self._read_json("usage-log.json", [])
+            log.append({
+                "provider_id": provider_id,
+                "timestamp": _now_iso(),
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+            })
+            # 保留最近 10000 条
+            if len(log) > 10000:
+                log = log[-10000:]
+            self._write_json("usage-log.json", log)
+        except Exception:
+            pass
+
+    def get_usage_stats(self) -> dict:
+        """获取 token 用量统计。"""
+        log = self._read_json("usage-log.json", [])
+        if not log:
+            return {"total_calls": 0, "total_input_tokens": 0,
+                    "total_output_tokens": 0, "total_cost": 0.0}
+
+        total_input = sum(e.get("input_tokens", 0) for e in log)
+        total_output = sum(e.get("output_tokens", 0) for e in log)
+        # 粗略估算：输入 $3/M, 输出 $15/M (以 Claude Opus 4.5 为参考)
+        estimated_cost = (total_input / 1_000_000 * 3.0) + (total_output / 1_000_000 * 15.0)
+
+        return {
+            "total_calls": len(log),
+            "total_input_tokens": total_input,
+            "total_output_tokens": total_output,
+            "total_cost": round(estimated_cost, 2),
+            "recent": log[-20:],
+        }
+
+    def auto_downgrade(self, provider_id: str) -> dict | None:
+        """当主 Provider 失败时，自动切换到下一个启用的 Provider。"""
+        providers = self.list_providers()
+        enabled = [p for p in providers if p.get("enabled")]
+
+        # 找到失败 Provider 的位置
+        current_idx = -1
+        for i, p in enumerate(enabled):
+            if p.get("id") == provider_id:
+                current_idx = i
+                break
+
+        if current_idx < 0:
+            return None
+
+        # 切换到下一个
+        for i in range(current_idx + 1, len(enabled)):
+            candidate = enabled[i]
+            # 快速连通性检查
+            try:
+                import urllib.request
+                test_url = candidate.get("base_url", "").rstrip("/")
+                if test_url:
+                    urllib.request.urlopen(f"{test_url}/models", timeout=5)
+                    return candidate
+            except Exception:
+                continue
+
+        return None
