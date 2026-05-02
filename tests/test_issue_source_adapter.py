@@ -1,7 +1,9 @@
 """IssueSourceAdapter 单元测试。"""
 
 from pathlib import Path
-from ralph.issue_source_adapter import LocalFileIssueSource, IssueClassifier, Issue
+from ralph.issue_source_adapter import (
+    LocalFileIssueSource, IssueClassifier, GitHubIssueSource, Issue,
+)
 
 
 def test_local_fetch_issues(tmp_path: Path):
@@ -26,6 +28,32 @@ def test_classifier_security():
     assert classified.issue_type == "security"
 
 
-def test_source_type():
+def test_source_type_local():
     source = LocalFileIssueSource(Path("/tmp"))
     assert source.source_type() == "local"
+
+
+def test_source_type_github():
+    source = GitHubIssueSource(repo="test/test")
+    assert source.source_type() == "github"
+
+
+def test_classify_by_labels():
+    assert GitHubIssueSource._classify_by_labels(["bug"]) == "bug"
+    assert GitHubIssueSource._classify_by_labels(["security"]) == "security"
+    assert GitHubIssueSource._classify_by_labels(["documentation"]) == "docs"
+    assert GitHubIssueSource._classify_by_labels(["enhancement"]) == "refactor"
+    assert GitHubIssueSource._classify_by_labels(["good first issue"]) == "feature"
+
+
+def test_classifier_fallback_to_feature():
+    classifier = IssueClassifier()
+    issue = Issue(issue_id="3", title="Add new button", description="users want a new button", source="local", issue_type="feature")
+    classified = classifier.classify(issue)
+    assert classified.issue_type == "feature"
+
+
+def test_issue_id_format():
+    issue = Issue(issue_id="test-123", title="Test", description="...")
+    assert issue.issue_id == "test-123"
+    assert issue.status == "open"

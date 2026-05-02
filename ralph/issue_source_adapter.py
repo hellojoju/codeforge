@@ -59,14 +59,75 @@ class LocalFileIssueSource(IssueSource):
         return issues
 
 
+class GitHubIssueSource(IssueSource):
+    """通过 GitHub API 拉取 Issues。"""
+
+    def __init__(self, repo: str, token: str = "", label: str = ""):
+        self._repo = repo
+        self._token = token
+        self._label = label
+
+    def source_type(self) -> str:
+        return "github"
+
+    def fetch(self) -> list[Issue]:
+        import json
+        import urllib.request
+
+        url = f"https://api.github.com/repos/{self._repo}/issues?state=open&per_page=50"
+        if self._label:
+            url += f"&labels={self._label}"
+
+        req = urllib.request.Request(url)
+        if self._token:
+            req.add_header("Authorization", f"Bearer {self._token}")
+        req.add_header("Accept", "application/vnd.github.v3+json")
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                gh_issues = json.loads(resp.read().decode())
+        except Exception:
+            return []
+
+        issues = []
+        for gi in gh_issues:
+            if "pull_request" in gi:
+                continue  # 跳过 PR
+            labels = [l.get("name", "") for l in gi.get("labels", [])]
+            issues.append(Issue(
+                issue_id=f"github-{gi['id']}",
+                title=gi.get("title", ""),
+                description=gi.get("body") or "",
+                source="github",
+                issue_type=self._classify_by_labels(labels),
+                status="open" if gi.get("state") == "open" else "closed",
+                labels=labels,
+                created_at=gi.get("created_at", ""),
+            ))
+        return issues
+
+    @staticmethod
+    def _classify_by_labels(labels: list[str]) -> str:
+        label_lower = " ".join(labels).lower()
+        if any(kw in label_lower for kw in ("bug", "bugfix")):
+            return "bug"
+        if any(kw in label_lower for kw in ("security", "vulnerability")):
+            return "security"
+        if any(kw in label_lower for kw in ("doc", "documentation")):
+            return "docs"
+        if any(kw in label_lower for kw in ("refactor", "enhancement")):
+            return "refactor"
+        return "feature"
+
+
 class IssueClassifier:
-    """基于关键词的 Issue 分类器。"""
+    """基于关键词的 Issue 分类器 + LLM 增强。"""
 
     KEYWORDS: dict[str, list[str]] = {
-        "bug": ["bug", "fix", "broken", "error", "fail", "crash"],
+        "bug": ["bug", "fix", "broken", "error", "fail", "crash", "exception"],
         "security": ["security", "vulnerability", "xss", "injection", "auth bypass"],
-        "docs": ["doc", "readme", "document", "guide"],
-        "refactor": ["refactor", "clean", "restructure", "rename"],
+        "docs": ["doc", "readme", "document", "guide", "tutorial"],
+        "refactor": ["refactor", "clean", "restructure", "rename", "deprecate"],
     }
 
     def classify(self, issue: Issue) -> Issue:
@@ -76,3 +137,31 @@ class IssueClassifier:
                 issue.issue_type = itype
                 return issue
         return issue  # stays as "feature"
+
+    def classify_with_llm(self, issue: Issue) -> Issue:
+        """尝试用 LLM 增强分类（通过 claude CLI）。"""
+        keyword_result = self.classify(issue)
+        if keyword_result.issue_type != "feature":
+            return keyword_result  # 关键词已经足够判断
+
+        # LLM 兜底：对关键词无法判断的 issue 调用 Claude
+        import subprocess
+        prompt = (
+            f"Classify this issue into exactly one: bug|feature|refactor|security|docs\n"
+            f"Title: {issue.title}\n"
+            f"Description: {issue.description[:500]}\n"
+            f"Output only the type name."
+        )
+        try:
+            result = subprocess.run(
+                ["claude", "-p", prompt, "--print"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                llm_type = result.stdout.strip().lower()
+                if llm_type in ("bug", "feature", "refactor", "security", "docs"):
+                    issue.issue_type = llm_type
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            pass  # LLM 不可用时静默使用关键词结果
+
+        return issue
