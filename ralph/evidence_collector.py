@@ -21,6 +21,24 @@ logger = logging.getLogger(__name__)
 class EvidenceCollector:
     """收集执行证据并保存到 .ralph/evidence/<work_id>/。"""
 
+    # Playwright 优先从 dashboard-ui 的 node_modules 找
+    _PLAYWRIGHT_BIN: str | None = None
+
+    @classmethod
+    def _find_playwright(cls) -> str | None:
+        if cls._PLAYWRIGHT_BIN is not None:
+            return cls._PLAYWRIGHT_BIN
+        candidates = [
+            str(Path.cwd() / "dashboard-ui" / "node_modules" / ".bin" / "playwright"),
+            str(Path.cwd() / "node_modules" / ".bin" / "playwright"),
+        ]
+        for c in candidates:
+            if Path(c).is_file():
+                cls._PLAYWRIGHT_BIN = c
+                return c
+        cls._PLAYWRIGHT_BIN = ""  # 标记已搜索过
+        return None
+
     def __init__(self, ralph_dir: Path) -> None:
         self._evidence_base = ralph_dir / "evidence"
         self._evidence_base.mkdir(parents=True, exist_ok=True)
@@ -80,9 +98,14 @@ class EvidenceCollector:
         evidence_dir.mkdir(parents=True, exist_ok=True)
         items: list[Evidence] = []
 
+        playwright_bin = self._find_playwright()
+        if not playwright_bin:
+            logger.debug("Playwright 不可用（未安装）: %s", work_id)
+            return items
+
         try:
             result = subprocess.run(
-                ["npx", "playwright", "screenshot", url,
+                [playwright_bin, "screenshot", url,
                  "--output", str(evidence_dir / "screenshot.png")],
                 capture_output=True, text=True, timeout=30,
             )
@@ -109,10 +132,15 @@ class EvidenceCollector:
         evidence_dir = self._evidence_base / work_id
         evidence_dir.mkdir(parents=True, exist_ok=True)
 
+        playwright_bin = self._find_playwright()
+        if not playwright_bin:
+            logger.debug("Playwright 不可用（未安装）: %s", work_id)
+            return items
+
         for label, w, h in sizes:
             try:
                 result = subprocess.run(
-                    ["npx", "playwright", "screenshot", url,
+                    [playwright_bin, "screenshot", url,
                      f"--viewport-size={w},{h}",
                      "--output", str(evidence_dir / f"screenshot-{label}.png")],
                     capture_output=True, text=True, timeout=30,
