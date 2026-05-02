@@ -100,6 +100,36 @@ class EvidenceCollector:
 
         return items
 
+    def collect_multi_size_screenshots(
+        self, work_id: str, url: str = "http://localhost:3000",
+    ) -> list[Evidence]:
+        """多尺寸 Playwright 截图（移动端/平板/桌面）。"""
+        sizes = [("mobile", 375, 812), ("tablet", 768, 1024), ("desktop", 1280, 800)]
+        items: list[Evidence] = []
+        evidence_dir = self._evidence_base / work_id
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+
+        for label, w, h in sizes:
+            try:
+                result = subprocess.run(
+                    ["npx", "playwright", "screenshot", url,
+                     f"--viewport-size={w},{h}",
+                     "--output", str(evidence_dir / f"screenshot-{label}.png")],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode == 0:
+                    items.append(Evidence(
+                        evidence_id=f"ev-{work_id}-screenshot-{label}",
+                        work_id=work_id,
+                        evidence_type="screenshot",
+                        file_path=str(evidence_dir / f"screenshot-{label}.png"),
+                        description=f"Screenshot {label} ({w}x{h})",
+                    ))
+            except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+                logger.debug("Playwright %s screenshot skipped: %s", label, work_id)
+
+        return items
+
     def _collect_diff(
         self, work_id: str, workspace_dir: Path, evidence_dir: Path
     ) -> Evidence | None:

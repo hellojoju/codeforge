@@ -1403,6 +1403,84 @@ def create_dashboard_app(
             "total": len(units),
         }
 
+    # --- Ralph API: Scheduling 端点 ---
+
+    @app.get("/api/ralph/scheduling/status")
+    async def ralph_scheduling_status() -> dict:
+        """返回当前调度状态。"""
+        repo: ProjectStateRepository = app.state.repository
+        features = repo.list_features()
+        statuses = {}
+        for f in features:
+            s = getattr(f, "status", "unknown")
+            statuses[s] = statuses.get(s, 0) + 1
+        return {
+            "active_work_units": statuses.get("in_progress", 0),
+            "pending_features": statuses.get("pending", 0),
+            "completed_features": statuses.get("done", 0),
+            "blocked_features": statuses.get("blocked", 0),
+        }
+
+    @app.get("/api/ralph/scheduling/timeline")
+    async def ralph_scheduling_timeline() -> list[dict]:
+        """返回调度事件时间线。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.get_scheduling_timeline(limit=50)
+
+    # --- Ralph API: Agent Definitions 端点 ---
+
+    @app.get("/api/ralph/agents/definitions")
+    async def ralph_list_agent_definitions() -> list[dict]:
+        """列出所有 Agent 定义。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.list_agent_definitions()
+
+    @app.post("/api/ralph/agents/definitions")
+    async def ralph_save_agent_definition(body: dict[str, Any]) -> dict:
+        """创建/更新 Agent 定义。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.save_agent_definition(body)
+
+    @app.delete("/api/ralph/agents/definitions/{role}")
+    async def ralph_delete_agent_definition(role: str) -> dict:
+        """删除 Agent 定义。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        ok = cfg.delete_agent_definition(role)
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"Agent {role} not found")
+        return {"success": True}
+
+    # --- Ralph API: Agent Provider 端点 (per-agent LLM config) ---
+
+    @app.get("/api/ralph/settings/agent-providers")
+    async def ralph_list_agent_providers() -> dict:
+        """列出所有 Agent 级 Provider 配置。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.list_agent_providers()
+
+    @app.get("/api/ralph/settings/agent-providers/{agent_id}")
+    async def ralph_get_agent_provider(agent_id: str) -> dict:
+        """获取指定 Agent 的 Provider 配置。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        config = cfg.get_agent_provider(agent_id)
+        if config is None:
+            return {}
+        return config
+
+    @app.put("/api/ralph/settings/agent-providers/{agent_id}")
+    async def ralph_save_agent_provider(agent_id: str, body: dict[str, Any]) -> dict:
+        """保存 Agent 级 Provider 配置。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.save_agent_provider(agent_id, body)
+
+    @app.post("/api/ralph/settings/resolve-provider")
+    async def ralph_resolve_provider(body: dict[str, Any]) -> dict:
+        """解析 agent 最终使用的 provider。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.resolve_agent_provider(
+            body.get("agent_role", ""), body.get("task_type", ""),
+        )
+
     # --- Ralph API: Memory 端点 ---
 
     @app.get("/api/ralph/memory/status")
@@ -1420,6 +1498,84 @@ def create_dashboard_app(
         ralph_dir = cfg._dir.parent
         from ralph.memory_archiver import MemoryArchiver
         return MemoryArchiver(ralph_dir).search(q, top_k)
+
+    # --- Ralph API: Specs + Contracts + Recon + Verification 端点 ---
+
+    @app.get("/api/ralph/specs")
+    async def ralph_list_specs() -> list[dict]:
+        from ralph.spec_change_manager import SpecChangeManager
+        cfg: RalphConfigManager = app.state.config_manager
+        return SpecChangeManager(cfg._dir.parent).list_specs()
+
+    @app.post("/api/ralph/specs/changes")
+    async def ralph_create_change(body: dict[str, Any]) -> dict:
+        from ralph.spec_change_manager import SpecChangeManager
+        from ralph.schema.spec_document import SpecChange
+        cfg: RalphConfigManager = app.state.config_manager
+        mgr = SpecChangeManager(cfg._dir.parent)
+        change = mgr.create_change(SpecChange(**body))
+        return {"change_id": change.change_id, "status": change.status}
+
+    @app.post("/api/ralph/specs/changes/{change_id}/approve")
+    async def ralph_approve_change(change_id: str) -> dict:
+        from ralph.spec_change_manager import SpecChangeManager
+        cfg: RalphConfigManager = app.state.config_manager
+        change = SpecChangeManager(cfg._dir.parent).approve_change(change_id)
+        if not change:
+            raise HTTPException(status_code=404, detail="Change not found")
+        return {"change_id": change.change_id, "status": change.status}
+
+    @app.get("/api/ralph/contracts")
+    async def ralph_list_contracts() -> list[dict]:
+        from ralph.contract_manager import ContractManager
+        cfg: RalphConfigManager = app.state.config_manager
+        return ContractManager(cfg._dir.parent).list_contracts()
+
+    @app.post("/api/ralph/contracts")
+    async def ralph_create_contract(body: dict[str, Any]) -> dict:
+        from ralph.contract_manager import ContractManager
+        from ralph.schema.contract import InterfaceContract
+        cfg: RalphConfigManager = app.state.config_manager
+        contract = ContractManager(cfg._dir.parent).save(InterfaceContract(**body))
+        return {"contract_id": contract.contract_id, "status": contract.status}
+
+    @app.post("/api/ralph/projects/recon")
+    async def ralph_recon_analyze(body: dict[str, Any]) -> dict:
+        from ralph.recon_analyzer import ReconAnalyzer
+        project_path = Path(body.get("path", os.environ.get("PROJECT_DIR", ".")))
+        analyzer = ReconAnalyzer()
+        return {"success": True, "analysis": analyzer.analyze(project_path.resolve())}
+
+    @app.post("/api/ralph/verification/checklist")
+    async def ralph_build_checklist(body: dict[str, Any]) -> dict:
+        from ralph.verification_manager import VerificationManager
+        cfg: RalphConfigManager = app.state.config_manager
+        vm = VerificationManager(cfg._dir.parent)
+        checklist = vm.build_checklist(body.get("work_id", ""))
+        vm.save_checklist(checklist)
+        return {"work_id": checklist.work_id, "checks": len(checklist.checks)}
+
+    @app.get("/api/ralph/toolchain/available")
+    async def ralph_toolchain_available() -> list[dict]:
+        from ralph.tool_adapter import ToolAdapterRegistry, ClaudeCodeAdapter
+        registry = ToolAdapterRegistry()
+        registry.register(ClaudeCodeAdapter())
+        available = registry.list_available()
+        return [{"tool_id": tid, "available": tid in available} for tid in registry._priority]
+
+    @app.get("/api/ralph/issues")
+    async def ralph_list_issues() -> list[dict]:
+        from ralph.issue_source_adapter import LocalFileIssueSource, IssueClassifier
+        cfg: RalphConfigManager = app.state.config_manager
+        issues_dir = cfg._dir.parent / "issues"
+        source = LocalFileIssueSource(issues_dir)
+        classifier = IssueClassifier()
+        issues = source.fetch()
+        return [{
+            "issue_id": i.issue_id, "title": i.title,
+            "issue_type": classifier.classify(i).issue_type,
+            "source": i.source, "status": i.status,
+        } for i in issues]
 
     return app
 
