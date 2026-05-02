@@ -27,11 +27,17 @@ class EvidenceCollector:
     @classmethod
     def _find_playwright(cls) -> str | None:
         if cls._PLAYWRIGHT_BIN is not None:
-            return cls._PLAYWRIGHT_BIN
+            return cls._PLAYWRIGHT_BIN if cls._PLAYWRIGHT_BIN else None
+        import os
+        project_root = os.environ.get("PROJECT_DIR", "")
         candidates = [
             str(Path.cwd() / "dashboard-ui" / "node_modules" / ".bin" / "playwright"),
             str(Path.cwd() / "node_modules" / ".bin" / "playwright"),
         ]
+        if project_root:
+            candidates.insert(0, str(Path(project_root) / "dashboard-ui" / "node_modules" / ".bin" / "playwright"))
+        # 硬编码的备用路径
+        candidates.append("/Users/jieson/auto-coding/dashboard-ui/node_modules/.bin/playwright")
         for c in candidates:
             if Path(c).is_file():
                 cls._PLAYWRIGHT_BIN = c
@@ -106,8 +112,9 @@ class EvidenceCollector:
         try:
             result = subprocess.run(
                 [playwright_bin, "screenshot", url,
-                 "--output", str(evidence_dir / "screenshot.png")],
+                 str(evidence_dir / "screenshot.png")],
                 capture_output=True, text=True, timeout=30,
+                env=self._playwright_env(),
             )
             if result.returncode == 0:
                 screenshot_path = evidence_dir / "screenshot.png"
@@ -142,8 +149,9 @@ class EvidenceCollector:
                 result = subprocess.run(
                     [playwright_bin, "screenshot", url,
                      f"--viewport-size={w},{h}",
-                     "--output", str(evidence_dir / f"screenshot-{label}.png")],
+                     str(evidence_dir / f"screenshot-{label}.png")],
                     capture_output=True, text=True, timeout=30,
+                    env=self._playwright_env(),
                 )
                 if result.returncode == 0:
                     items.append(Evidence(
@@ -157,6 +165,15 @@ class EvidenceCollector:
                 logger.debug("Playwright %s screenshot skipped: %s", label, work_id)
 
         return items
+
+    @staticmethod
+    def _playwright_env() -> dict:
+        import os
+        env = {k: v for k, v in os.environ.items()}
+        cached = str(Path.home() / "Library" / "Caches" / "ms-playwright")
+        if cached:
+            env["PLAYWRIGHT_BROWSERS_PATH"] = cached
+        return env
 
     def _collect_diff(
         self, work_id: str, workspace_dir: Path, evidence_dir: Path
