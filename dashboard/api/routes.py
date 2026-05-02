@@ -1499,6 +1499,68 @@ def create_dashboard_app(
         from ralph.memory_archiver import MemoryArchiver
         return MemoryArchiver(ralph_dir).search(q, top_k)
 
+    # --- Ralph API: Phase 4 端点 ---
+
+    @app.get("/api/ralph/usage/stats")
+    async def ralph_usage_stats() -> dict:
+        """获取 API 用量和成本统计。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        stats = cfg.get_usage_stats()
+        # 按 provider 汇总
+        log = cfg._read_json("usage-log.json", [])
+        by_provider: dict[str, int] = {}
+        for entry in log:
+            pid = entry.get("provider_id", "unknown")
+            by_provider[pid] = by_provider.get(pid, 0) + 1
+        stats["by_provider"] = by_provider
+        return stats
+
+    @app.get("/api/ralph/projects/history")
+    async def ralph_project_history() -> list[dict]:
+        """列出历史项目记录。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        recent = cfg.list_recent_projects()
+        history = []
+        for p in recent:
+            path = Path(p["path"])
+            has_ralph = (path / ".ralph").is_dir()
+            work_units = len(list((path / ".ralph" / "work_units").glob("*.json"))) if has_ralph else 0
+            history.append({
+                "name": p.get("name", path.name),
+                "path": p["path"],
+                "last_opened_at": p.get("last_opened_at", ""),
+                "has_ralph": has_ralph,
+                "work_unit_count": work_units,
+                "status": "completed" if work_units > 0 else "empty",
+            })
+        return history
+
+    @app.get("/api/ralph/providers/health")
+    async def ralph_providers_health() -> list[dict]:
+        """获取所有 Provider 的健康状态。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        results = []
+        for p in cfg.list_providers():
+            # 简单连通性检查
+            import urllib.request
+            healthy = False
+            base_url = p.get("base_url", "")
+            if base_url:
+                try:
+                    urllib.request.urlopen(f"{base_url.rstrip('/')}/models", timeout=5)
+                    healthy = True
+                except Exception:
+                    healthy = False
+            results.append({
+                "id": p.get("id"),
+                "name": p.get("name"),
+                "enabled": p.get("enabled", False),
+                "healthy": healthy,
+                "last_tested_at": p.get("last_tested_at"),
+                "last_test_result": p.get("last_test_result"),
+            })
+        return results
+
     # --- Ralph API: Specs + Contracts + Recon + Verification 端点 ---
 
     @app.get("/api/ralph/specs")
