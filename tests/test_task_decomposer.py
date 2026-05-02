@@ -26,7 +26,7 @@ def test_decompose_from_prd(tmp_path: Path):
         {"name": "user auth api", "description": "实现用户注册和登录 API"},
         {"name": "todo frontend page", "description": "Todo 列表页面 UI 组件"},
     ])
-    units = td.decompose(prd)
+    stories, units = td.decompose(prd)
     assert len(units) >= 2
     assert all(u.status.value == "draft" for u in units)
     assert all(u.task_harness is not None for u in units)
@@ -37,7 +37,7 @@ def test_validate_granularity_passes(tmp_path: Path):
     prd = PRDDocument(prd_id="prd-test", project_name="Test", core_features=[
         {"name": "f1", "description": "desc"},
     ])
-    units = td.decompose(prd)
+    stories, units = td.decompose(prd)
     failures = td.validate_granularity(units)
     assert len(failures) == 0, f"Unexpected failures: {failures}"
 

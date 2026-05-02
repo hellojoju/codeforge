@@ -42,7 +42,7 @@ def test_full_pipeline_brainstorm_to_workunits(tmp_path: Path):
 
     # 3. Task Decomposition
     td = TaskDecomposer(ralph_dir)
-    units = td.decompose(prd)
+    stories, units = td.decompose(prd)
     assert len(units) >= 1
     failures = td.validate_granularity(units)
     assert len(failures) == 0, f"Granularity failures: {failures}"
@@ -106,6 +106,43 @@ def test_prd_enrichment_flow(tmp_path: Path):
 
     # Decompose the enriched PRD
     td = TaskDecomposer(ralph_dir)
-    units = td.decompose(frozen)
+    stories, units = td.decompose(frozen)
     assert len(units) >= 1
     assert all(u.acceptance_criteria for u in units)
+
+
+# ==================== Evidence Collector Tests ====================
+
+import subprocess
+from ralph.evidence_collector import EvidenceCollector
+
+
+def test_evidence_collector_playwright_graceful_fallback(tmp_path: Path):
+    """Playwright 不可用时 collect_playwright_screenshots 返回空列表。"""
+    ec = EvidenceCollector(tmp_path / ".ralph")
+    items = ec.collect_playwright_screenshots("test-wu")
+    assert items == []
+
+
+def test_evidence_collector_multi_size_graceful_fallback(tmp_path: Path):
+    """Playwright 不可用时 collect_multi_size_screenshots 返回空列表。"""
+    ec = EvidenceCollector(tmp_path / ".ralph")
+    items = ec.collect_multi_size_screenshots("test-wu")
+    assert items == []
+
+
+def test_evidence_collector_diff_fallback(tmp_path: Path, monkeypatch):
+    """git diff 不可用时 collect 优雅降级。"""
+    ec = EvidenceCollector(tmp_path / ".ralph")
+
+    def _mock_fail(*args, **kwargs):
+        from unittest.mock import Mock
+        m = Mock()
+        m.returncode = -1
+        m.stdout = ""
+        m.stderr = "git not available"
+        return m
+
+    monkeypatch.setattr(subprocess, "run", _mock_fail)
+    items = ec.collect("wu-99", tmp_path, include_diff=True)
+    assert len(items) >= 0

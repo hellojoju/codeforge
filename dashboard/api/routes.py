@@ -1393,7 +1393,7 @@ def create_dashboard_app(
         if prd is None:
             raise HTTPException(status_code=404, detail="PRD not found")
         td = TaskDecomposer(ralph_dir)
-        units = td.decompose(prd)
+        stories, units = td.decompose(prd)
         failures = td.validate_granularity(units)
         dag = td.build_dependency_dag(units)
         return {

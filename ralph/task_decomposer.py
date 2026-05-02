@@ -5,9 +5,23 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from dataclasses import dataclass, field
 from ralph.schema.work_unit import WorkUnit, WorkUnitStatus
 from ralph.schema.task_harness import TaskHarness, RetryPolicy, TimeoutPolicy
 from ralph.schema.prd_document import PRDDocument
+
+
+@dataclass
+class Story:
+    """用户故事：一个垂直切片功能，拆解为多个 WorkUnit。"""
+    story_id: str
+    title: str
+    description: str
+    work_units: list[str] = field(default_factory=list)  # work_ids
+    acceptance_criteria: list[str] = field(default_factory=list)
+    estimated_complexity: str = "M"  # XS | S | M | L | XL
+    status: str = "draft"  # draft | in_progress | done
+    dependencies: list[str] = field(default_factory=list)  # story_ids
 
 
 class TaskDecomposer:
@@ -31,14 +45,22 @@ class TaskDecomposer:
         self._dir.mkdir(parents=True, exist_ok=True)
 
     def decompose(self, prd: PRDDocument,
-                  codebase_analysis: dict | None = None) -> list[WorkUnit]:
-        """从 PRD 拆解出 WorkUnit 列表。"""
-        work_units = []
+                  codebase_analysis: dict | None = None) -> tuple[list[Story], list[WorkUnit]]:
+        """从 PRD 拆解为 Story 列表 + WorkUnit 列表。"""
+        stories: list[Story] = []
+        work_units: list[WorkUnit] = []
 
         for i, feature in enumerate(prd.core_features):
             feature_name = feature.get("name", f"feature-{i}")
             feature_desc = feature.get("description", "")
+            story = Story(
+                story_id=f"story-{prd.prd_id}-{i:02d}",
+                title=feature_name,
+                description=feature_desc,
+                acceptance_criteria=feature.get("acceptance_criteria", []),
+            )
             sub_tasks = self._break_down_feature(feature_name, feature_desc)
+            work_ids: list[str] = []
 
             for j, sub in enumerate(sub_tasks):
                 wu_id = f"wu-{prd.prd_id}-{i:02d}-{j:02d}"
@@ -47,6 +69,7 @@ class TaskDecomposer:
                 raw_deny = sub.get("scope_deny", [])
                 if isinstance(raw_deny, str):
                     raw_deny = [raw_deny]
+                work_ids.append(wu_id)
                 wu = WorkUnit(
                     work_id=wu_id,
                     work_type="development",
@@ -66,9 +89,12 @@ class TaskDecomposer:
                 )
                 work_units.append(wu)
 
+            story.work_units = work_ids
+            stories.append(story)
+
         self._resolve_dependencies(work_units)
         self._save(work_units)
-        return work_units
+        return stories, work_units
 
     def validate_granularity(self, work_units: list[WorkUnit]) -> list[dict]:
         """颗粒度门禁检查。"""
