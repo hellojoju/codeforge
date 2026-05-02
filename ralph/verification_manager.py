@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import subprocess
 from ralph.schema.brainstorm_record import UserPath
 
 
@@ -75,6 +76,60 @@ class VerificationManager:
                 "notes": f"Save screenshot at {w}x{h}",
             })
         return checklist
+
+    def capture_console_errors(self, url: str) -> list[dict]:
+        """使用 Playwright 捕获页面控制台错误。"""
+        playwright = self._find_playwright()
+        if not playwright:
+            return []
+
+        js_code = (
+            "window.__ralph_errors__ = [];"
+            "window.addEventListener('error', e => {"
+            "  window.__ralph_errors__.push({"
+            "    message: e.message, filename: e.filename, lineno: e.lineno, colno: e.colno"
+            "  });"
+            "});"
+            "window.addEventListener('unhandledrejection', e => {"
+            "  window.__ralph_errors__.push({"
+            "    message: e.reason?.message || String(e.reason), type: 'unhandledrejection'"
+            "  });"
+            "});"
+        )
+        try:
+            result = subprocess.run(
+                [playwright, "script", url, "-e", js_code],
+                capture_output=True, text=True, timeout=15,
+            )
+            return [{"captured": True, "url": url, "stdout": result.stdout[:500]}]
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            return [{"captured": False, "error": "Console capture failed"}]
+
+    def capture_network_errors(self, url: str) -> list[dict]:
+        """使用 Playwright 捕获网络请求错误。"""
+        playwright = self._find_playwright()
+        if not playwright:
+            return []
+
+        try:
+            # 使用 playwright trace 记录网络请求
+            result = subprocess.run(
+                [playwright, "trace", "view", "--trace-file", url],
+                capture_output=True, text=True, timeout=15,
+            )
+            return [{"captured": True, "url": url}]
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            return [{"captured": False, "error": "Network capture failed"}]
+
+    def _find_playwright(self) -> str | None:
+        candidates = [
+            str(Path.cwd() / "dashboard-ui" / "node_modules" / ".bin" / "playwright"),
+            str(Path.cwd() / "node_modules" / ".bin" / "playwright"),
+        ]
+        for c in candidates:
+            if Path(c).is_file():
+                return c
+        return None
 
     def get_checklist(self, work_id: str) -> VerificationChecklist | None:
         path = self._dir / "evidence" / f"{work_id}_checklist.json"

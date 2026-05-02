@@ -69,11 +69,21 @@ class MemoryArchiver:
     def record_decision(self, decision: str, context: str,
                         alternatives: list[str] | None = None) -> None:
         memory = self._read_medium_term()
+        # 标记之前相同主题的决策为 superseded
+        for entry in memory:
+            if (entry.get("type") == "decision"
+                    and not entry.get("superseded_by")
+                    and any(w in str(entry.get("decision", "")).lower()
+                            for w in decision.lower().split()[:3])):
+                entry["superseded_by"] = decision
+                entry["superseded_at"] = _now_iso()
         memory.append({
             "type": "decision",
             "decision": decision,
             "context": context,
             "alternatives": alternatives or [],
+            "superseded_by": None,
+            "superseded_at": None,
             "recorded_at": _now_iso(),
         })
         if len(memory) > self.MEDIUM_TERM_MAX:
