@@ -33,17 +33,26 @@ class PRDManager:
             brainstorm_record_id=brainstorm_record_id,
         )
 
-        # 从 facts 映射到 PRD 章节
+        # 从 facts 映射到 PRD 章节（含追溯关系 source_facts）
+        prd.user_goal_sources = []
+        prd.feature_sources = []
+        prd.scope_sources = []
+        prd.criteria_sources = []
+
         for fact in summary["confirmed_facts"]:
             topic, content = fact["topic"], fact["fact"]
             if topic == "目标用户":
                 prd.user_goals.append(f"目标用户: {content}")
+                prd.user_goal_sources.append(topic)
             elif topic == "核心功能":
                 prd.core_features.append({"name": content, "description": ""})
+                prd.feature_sources.append(topic)
             elif topic == "暂不做的功能":
                 prd.out_of_scope.append(content)
+                prd.scope_sources.append(topic)
             elif topic == "验收标准":
                 prd.success_criteria.append(content)
+                prd.criteria_sources.append(topic)
             elif topic == "权限规则":
                 prd.non_functional["权限"] = content
             elif topic == "数据模型概要":

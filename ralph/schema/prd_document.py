@@ -27,6 +27,12 @@ class PRDDocument:
     risks: list[str] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
 
+    # 追溯关系（source_traceability）
+    user_goal_sources: list[str] = field(default_factory=list)
+    feature_sources: list[str] = field(default_factory=list)
+    scope_sources: list[str] = field(default_factory=list)
+    criteria_sources: list[str] = field(default_factory=list)
+
     # 元信息
     brainstorm_record_id: str = ""
     created_at: str = field(default_factory=_now_iso)

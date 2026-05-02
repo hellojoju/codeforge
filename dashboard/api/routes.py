@@ -1639,6 +1639,30 @@ def create_dashboard_app(
             "source": i.source, "status": i.status,
         } for i in issues]
 
+    @app.post("/api/ralph/issues/auto-create")
+    async def ralph_issues_auto_create() -> dict:
+        """将未处理的 Issue 按策略自动生成为 WorkUnit。"""
+        from ralph.issue_source_adapter import (
+            LocalFileIssueSource, IssueClassifier, issues_to_work_units,
+        )
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        issues_dir = ralph_dir / "issues"
+        source = LocalFileIssueSource(issues_dir)
+        classifier = IssueClassifier()
+        policy = cfg.get_issue_policy()
+        issues = source.fetch()
+        classified = [classifier.classify(i) for i in issues]
+        units = issues_to_work_units(classified, policy)
+        # 写入 tasks 目录，供后续处理
+        tasks_dir = ralph_dir / "tasks"
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        (tasks_dir / "auto_created_tasks.json").write_text(
+            _json.dumps(units, indent=2, ensure_ascii=False),
+        )
+        return {"total_issues": len(issues), "auto_created": len(units), "tasks": units}
+
     # --- Ralph API: Source Docs Check + Coupling Analyzer 端点 ---
 
     @app.post("/api/ralph/source-docs/scan")

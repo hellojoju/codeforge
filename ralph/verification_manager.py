@@ -161,6 +161,26 @@ class VerificationManager:
                 return c
         return None
 
+    def run_tests(self, test_command: str = "", project_dir: Path | None = None) -> dict:
+        """运行测试/typecheck/lint。"""
+        import subprocess
+        import re
+        base = project_dir or self._dir
+        cmd = test_command or "python3 -m pytest -q"
+        try:
+            result = subprocess.run(
+                cmd.split(), cwd=base,
+                capture_output=True, text=True, timeout=600,
+            )
+            passed = result.returncode == 0
+            match = re.search(r"(\d+) passed", result.stdout)
+            total = int(match.group(1)) if match else 0
+            return {"success": passed, "total": total, "output": result.stdout[-300], "command": cmd}
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Timeout"}
+        except FileNotFoundError:
+            return {"success": False, "error": f"Command not found: {cmd}"}
+
     def get_checklist(self, work_id: str) -> VerificationChecklist | None:
         path = self._dir / "evidence" / f"{work_id}_checklist.json"
         if not path.is_file():
