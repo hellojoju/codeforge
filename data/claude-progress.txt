@@ -1795,3 +1795,30 @@
 [2026-05-02 10:06:05] f1 进入验收阶段
 [2026-05-02 10:06:05] f1 开始开发: Feature f1
 [2026-05-02 10:06:05] f1 完成: Feature f1
+[2026-05-02 15:44:47] [backend] 开始backend任务: F001 - test feature
+[2026-05-02 15:44:47] [backend] 开始backend任务: F002 - fail feature
+[2026-05-02 15:44:47] [backend] 开始backend任务: F001 - 测试任务
+[2026-05-02 15:44:47] [backend] claude -p 执行目录: /private/tmp/claude-501/pytest-of-jieson/pytest-20/test_execute_success_with_mock0
+[2026-05-02 15:44:47] [backend] 任务执行成功, 输出 4 字符
+[2026-05-02 15:44:47] [backend] 开始backend任务: F002 - 失败任务
+[2026-05-02 15:44:47] [backend] claude -p 执行目录: /private/tmp/claude-501/pytest-of-jieson/pytest-20/test_execute_failure_with_mock0
+[2026-05-02 15:44:47] [backend] 任务执行失败: error: something went wrong
+[2026-05-02 15:44:47] [backend] 开始backend任务: F003 - 测试
+[2026-05-02 15:44:47] [backend] claude -p 执行目录: /private/tmp/claude-501/pytest-of-jieson/pytest-20/test_execute_claude_not_found0
+[2026-05-02 15:44:47] [backend] claude CLI未找到
+[2026-05-02 15:44:47] [backend] 开始backend任务: F004 - 超时任务
+[2026-05-02 15:44:47] [backend] claude -p 执行目录: /private/tmp/claude-501/pytest-of-jieson/pytest-20/test_execute_timeout0
+[2026-05-02 15:44:47] [backend] 任务执行超时(600秒)
+[2026-05-02 15:44:47] [backend] git commit: test: commit message
+[2026-05-02 15:44:47] [backend] git commit 失败: 
+[2026-05-02 15:44:48] F001 完成: 用户注册
+[2026-05-02 15:44:48] F001 完成: 注册
+[2026-05-02 15:44:48] F002 开始开发: 登录
+[2026-05-02 15:44:48] 批量导入 5 个features
+[2026-05-02 15:44:50] 批量导入 3 个features
+[2026-05-02 15:44:50] f1 开始开发: Feature f1
+[2026-05-02 15:44:50] f1 完成: Feature f1
+[2026-05-02 15:44:50] f1 被阻塞: missing env
+[2026-05-02 15:44:50] f1 进入验收阶段
+[2026-05-02 15:44:50] f1 开始开发: Feature f1
+[2026-05-02 15:44:50] f1 完成: Feature f1
