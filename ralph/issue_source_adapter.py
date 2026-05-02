@@ -120,6 +120,37 @@ class GitHubIssueSource(IssueSource):
         return "feature"
 
 
+def issues_to_work_units(issues: list[Issue], policy: dict | None = None) -> list[dict]:
+    """根据 Issue 列表和策略自动生成 WorkUnit 创建请求。"""
+    if policy is None:
+        policy = {"classification_rules": {}}
+
+    rules = policy.get("classification_rules", {})
+    units = []
+
+    for issue in issues:
+        action = rules.get(issue.issue_type, "require_approval")
+        if action == "ignore":
+            continue
+        units.append({
+            "source": "issue",
+            "issue_id": issue.issue_id,
+            "title": f"[{issue.issue_type}] {issue.title}",
+            "description": issue.description,
+            "work_type": issue.issue_type,
+            "action": action,
+            "producer_role": _issue_type_to_role(issue.issue_type),
+        })
+
+    return units
+
+
+def _issue_type_to_role(issue_type: str) -> str:
+    mapping = {"bug": "qa", "security": "security", "feature": "backend",
+               "refactor": "architect", "docs": "docs"}
+    return mapping.get(issue_type, "backend")
+
+
 class IssueClassifier:
     """基于关键词的 Issue 分类器 + LLM 增强。"""
 

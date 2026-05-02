@@ -18,6 +18,48 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+_ENCRYPTION_KEY: bytes | None = None
+
+
+def _get_encryption_key(ralph_dir: Path) -> bytes:
+    global _ENCRYPTION_KEY
+    if _ENCRYPTION_KEY is not None:
+        return _ENCRYPTION_KEY
+    key_file = ralph_dir / "config" / ".key"
+    if key_file.is_file():
+        _ENCRYPTION_KEY = key_file.read_bytes().strip()
+    else:
+        _ENCRYPTION_KEY = os.urandom(32)
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        key_file.write_bytes(_ENCRYPTION_KEY)
+    return _ENCRYPTION_KEY
+
+
+def _encrypt_api_key(plaintext: str, ralph_dir: Path) -> str:
+    """加密 API Key。"""
+    import base64
+    import hashlib
+    key = _get_encryption_key(ralph_dir)
+    key_hash = hashlib.sha256(key).digest()
+    data = plaintext.encode()
+    encrypted = bytes(data[i] ^ key_hash[i % len(key_hash)] for i in range(len(data)))
+    return base64.b64encode(encrypted).decode()
+
+
+def _decrypt_api_key(ciphertext: str, ralph_dir: Path) -> str:
+    """解密 API Key。"""
+    import base64
+    import hashlib
+    try:
+        key = _get_encryption_key(ralph_dir)
+        key_hash = hashlib.sha256(key).digest()
+        encrypted = base64.b64decode(ciphertext)
+        decrypted = bytes(encrypted[i] ^ key_hash[i % len(key_hash)] for i in range(len(encrypted)))
+        return decrypted.decode()
+    except Exception:
+        return ""
+
+
 # ==================== Models ====================
 
 
@@ -84,20 +126,35 @@ class RalphConfigManager:
     # --- Providers ---
 
     def list_providers(self) -> list[dict]:
-        return self._read_json("providers.json", [])
+        providers = self._read_json("providers.json", [])
+        # 返回时不暴露 api_key
+        return [{k: v for k, v in p.items() if k != "api_key"} for p in providers]
 
     def get_provider(self, provider_id: str) -> dict | None:
-        providers = self.list_providers()
+        providers = self._read_json("providers.json", [])
         for p in providers:
             if p.get("id") == provider_id:
+                return {k: v for k, v in p.items() if k != "api_key"}
+        return None
+
+    def get_provider_decrypted(self, provider_id: str) -> dict | None:
+        """获取 Provider 配置（含解密后的 api_key），仅内部使用。"""
+        providers = self._read_json("providers.json", [])
+        for p in providers:
+            if p.get("id") == provider_id:
+                if p.get("api_key"):
+                    p = dict(p)
+                    p["api_key"] = _decrypt_api_key(p["api_key"], self._dir.parent)
                 return p
         return None
 
     def save_provider(self, provider: dict) -> dict:
         provider["updated_at"] = _now_iso()
+        # 加密 API Key
+        if provider.get("api_key"):
+            provider["api_key"] = _encrypt_api_key(provider["api_key"], self._dir.parent)
         providers = self.list_providers()
 
-        # Upsert
         for i, p in enumerate(providers):
             if p.get("id") == provider.get("id"):
                 providers[i] = provider
@@ -106,7 +163,10 @@ class RalphConfigManager:
             providers.append(provider)
 
         self._write_json("providers.json", providers)
-        return provider
+        # 返回时不包含 api_key（安全）
+        safe = dict(provider)
+        safe.pop("api_key", None)
+        return safe
 
     def delete_provider(self, provider_id: str) -> bool:
         providers = self.list_providers()
@@ -121,7 +181,7 @@ class RalphConfigManager:
         import urllib.request
         import urllib.error
 
-        provider = self.get_provider(provider_id)
+        provider = self.get_provider_decrypted(provider_id)
         if not provider:
             return {"ok": False, "error": f"Provider {provider_id} not found"}
 

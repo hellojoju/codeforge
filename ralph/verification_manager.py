@@ -121,6 +121,36 @@ class VerificationManager:
         except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
             return [{"captured": False, "error": "Network capture failed"}]
 
+    def exploratory_click_test(self, url: str, click_count: int = 5) -> list[dict]:
+        """探索式点击测试：自动点击页面元素，捕获异常。"""
+        playwright = self._find_playwright()
+        if not playwright:
+            return []
+
+        js_code = f"""
+        const results = [];
+        const urls = [{url!r}];
+        const elements = document.querySelectorAll('a, button, [role="button"], input, select');
+        const targets = Array.from(elements).slice(0, {click_count});
+        for (const el of targets) {{
+            try {{
+                el.click();
+                results.push({{tag: el.tagName, text: (el.textContent || '').trim().slice(0, 50), success: true}});
+            }} catch(e) {{
+                results.push({{tag: el.tagName, text: (el.textContent || '').trim().slice(0, 50), success: false, error: e.message}});
+            }}
+        }}
+        return results;
+        """
+        try:
+            result = subprocess.run(
+                [playwright, "script", url, "-e", js_code],
+                capture_output=True, text=True, timeout=30,
+            )
+            return [{"clicked": True, "url": url, "stdout": result.stdout[:1000]}]
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            return [{"clicked": False, "error": "Exploratory test failed"}]
+
     def _find_playwright(self) -> str | None:
         candidates = [
             str(Path.cwd() / "dashboard-ui" / "node_modules" / ".bin" / "playwright"),
