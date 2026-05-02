@@ -320,6 +320,13 @@ class WorkUnitEngine:
             self._repository.transition(
                 work_id, WorkUnitStatus.NEEDS_REWORK, actor_role="scheduler", reason="审查不通过，需返工"
             )
+            # MVP 第 25 项: review 问题转任务 — 保存返工请求到 evidence
+            rework_request = self._review_mgr.create_rework_request(review)
+            if rework_request:
+                import json
+                rework_path = self._repository._ralph_dir / "evidence" / work_id / "rework_request.json"
+                rework_path.parent.mkdir(parents=True, exist_ok=True)
+                rework_path.write_text(json.dumps(rework_request, indent=2, ensure_ascii=False))
         else:
             self._repository.transition(
                 work_id, WorkUnitStatus.BLOCKED, actor_role="scheduler", reason=f"审查结论: {review.recommended_action}"
