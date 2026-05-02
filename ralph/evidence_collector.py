@@ -69,6 +69,37 @@ class EvidenceCollector:
         logger.info("为 %s 收集了 %d 个证据", work_id, len(items))
         return items
 
+    def collect_playwright_screenshots(
+        self, work_id: str, url: str = "http://localhost:3000",
+    ) -> list[Evidence]:
+        """尝试用 Playwright 采集浏览器截图证据。
+
+        如果 Playwright 不可用则静默跳过，不阻塞管道。
+        """
+        evidence_dir = self._evidence_base / work_id
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        items: list[Evidence] = []
+
+        try:
+            result = subprocess.run(
+                ["npx", "playwright", "screenshot", url,
+                 "--output", str(evidence_dir / "screenshot.png")],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                screenshot_path = evidence_dir / "screenshot.png"
+                items.append(Evidence(
+                    evidence_id=f"ev-{work_id}-playwright",
+                    work_id=work_id,
+                    evidence_type="screenshot",
+                    file_path=str(screenshot_path),
+                    description=f"Playwright screenshot of {url}",
+                ))
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            logger.debug("Playwright 截图跳过（不可用）: %s", work_id)
+
+        return items
+
     def _collect_diff(
         self, work_id: str, workspace_dir: Path, evidence_dir: Path
     ) -> Evidence | None:
