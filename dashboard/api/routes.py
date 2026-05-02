@@ -1092,7 +1092,268 @@ def create_dashboard_app(
         cfg: RalphConfigManager = app.state.config_manager
         return cfg.save_issue_policy(body)
 
+    # --- Ralph API: 项目管理端点 ---
+
+    @app.get("/api/ralph/projects")
+    async def ralph_list_projects() -> list[dict]:
+        """列出已知项目（最近打开 + 扫描发现）。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        recent = cfg.list_recent_projects()
+
+        # 扫描默认项目目录
+        base_dir = Path(os.environ.get("RALPH_PROJECTS_DIR", str(Path.home() / "ralph-projects")))
+        discovered = []
+        if base_dir.is_dir():
+            for d in sorted(base_dir.iterdir()):
+                if d.is_dir() and (d / ".ralph").is_dir():
+                    discovered.append({
+                        "name": d.name,
+                        "path": str(d.resolve()),
+                        "has_ralph": True,
+                    })
+
+        # 合并去重
+        seen = set()
+        result = []
+        for p in recent:
+            key = p["path"]
+            if key not in seen:
+                seen.add(key)
+                result.append({**p, "has_ralph": Path(p["path"]).is_dir()})
+
+        for p in discovered:
+            if p["path"] not in seen:
+                seen.add(p["path"])
+                result.append({**p, "last_opened_at": None})
+
+        return result
+
+    @app.post("/api/ralph/projects/open")
+    async def ralph_open_project(body: dict[str, Any]) -> dict:
+        """打开/选择当前项目。"""
+        path_str = body.get("path", "")
+        if not path_str:
+            raise HTTPException(status_code=422, detail="path is required")
+
+        project_path = Path(path_str).resolve()
+        if not project_path.is_dir():
+            raise HTTPException(status_code=404, detail=f"Directory not found: {path_str}")
+
+        cfg: RalphConfigManager = app.state.config_manager
+        cfg.add_recent_project(str(project_path), project_path.name)
+
+        # 检查项目状态
+        ralph_repo: RalphRepository = app.state.ralph_repository
+        work_units = ralph_repo.list_work_units()
+
+        return {
+            "success": True,
+            "name": project_path.name,
+            "path": str(project_path),
+            "work_unit_count": len(work_units),
+            "has_analysis": cfg.get_analysis() is not None,
+        }
+
+    @app.post("/api/ralph/projects/analyze")
+    async def ralph_analyze_project(body: dict[str, Any] | None = None) -> dict:
+        """运行代码库侦察分析。"""
+        body = body or {}
+        project_path_str = body.get("path", os.environ.get("PROJECT_DIR", "."))
+        project_path = Path(project_path_str).resolve()
+
+        if not project_path.is_dir():
+            raise HTTPException(status_code=404, detail=f"Directory not found: {project_path_str}")
+
+        # 运行分析
+        analysis = _analyze_project(project_path)
+        cfg: RalphConfigManager = app.state.config_manager
+        cfg.save_analysis(str(project_path), analysis)
+
+        return {"success": True, "analysis": analysis}
+
+    @app.get("/api/ralph/projects/analysis")
+    async def ralph_get_analysis() -> dict:
+        """获取缓存的项目分析结果。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        analysis = cfg.get_analysis()
+        if not analysis:
+            raise HTTPException(status_code=404, detail="No analysis found. Run analyze first.")
+        return analysis
+
+    @app.post("/api/ralph/projects/init")
+    async def ralph_init_project(body: dict[str, Any]) -> dict:
+        """初始化新项目。"""
+        path_str = body.get("path", "")
+        name = body.get("name", "")
+        if not path_str:
+            raise HTTPException(status_code=422, detail="path is required")
+
+        project_path = Path(path_str).resolve()
+        project_path.mkdir(parents=True, exist_ok=True)
+
+        # 创建 .ralph/ 目录结构
+        ralph_dir = project_path / ".ralph"
+        for sub in ["config", "work_units", "evidence", "reviews", "blockers", "state", "memory", "reports"]:
+            (ralph_dir / sub).mkdir(parents=True, exist_ok=True)
+
+        # 初始化 git
+        import subprocess
+        try:
+            subprocess.run(["git", "init", "-b", "main"], cwd=project_path, capture_output=True, timeout=10)
+        except Exception:
+            pass  # git 可能不可用
+
+        cfg: RalphConfigManager = app.state.config_manager
+        cfg.add_recent_project(str(project_path), name or project_path.name)
+
+        return {
+            "success": True,
+            "name": name or project_path.name,
+            "path": str(project_path),
+        }
+
+    # --- Ralph API: 文件浏览端点 ---
+
+    @app.get("/api/ralph/files")
+    async def ralph_list_files(path: str = "") -> list[dict]:
+        """列出目录内容（相对于当前项目根目录）。"""
+        project_dir = Path(os.environ.get("PROJECT_DIR", ".")).resolve()
+        target = (project_dir / path).resolve() if path else project_dir
+
+        # 安全检查
+        try:
+            target.relative_to(project_dir)
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Access denied: path outside project")
+
+        if not target.exists():
+            raise HTTPException(status_code=404, detail=f"Path not found: {path}")
+        if not target.is_dir():
+            raise HTTPException(status_code=400, detail=f"Not a directory: {path}")
+
+        entries = []
+        for entry in sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+            if entry.name.startswith(".") and entry.name not in (".ralph", ".gitignore"):
+                continue
+            entries.append({
+                "name": entry.name,
+                "type": "dir" if entry.is_dir() else "file",
+                "path": str(entry.relative_to(project_dir)),
+                "size": entry.stat().st_size if entry.is_file() else None,
+            })
+
+        return entries
+
+    @app.get("/api/ralph/files/content")
+    async def ralph_get_file_content(path: str = "") -> dict:
+        """获取文件内容（纯文本，最大 500KB）。"""
+        project_dir = Path(os.environ.get("PROJECT_DIR", ".")).resolve()
+        file_path = (project_dir / path).resolve()
+
+        try:
+            file_path.relative_to(project_dir)
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Access denied: path outside project")
+
+        if not file_path.is_file():
+            raise HTTPException(status_code=404, detail=f"File not found: {path}")
+
+        size = file_path.stat().st_size
+        if size > 500 * 1024:
+            raise HTTPException(status_code=413, detail="File too large (>500KB)")
+
+        try:
+            content = file_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            content = f"[Binary file: {size} bytes]"
+
+        return {
+            "name": file_path.name,
+            "path": path,
+            "size": size,
+            "content": content,
+        }
+
+    @app.get("/api/ralph/files/tree")
+    async def ralph_get_file_tree(depth: int = 3) -> dict:
+        """递归获取目录树（最大深度 5）。"""
+        project_dir = Path(os.environ.get("PROJECT_DIR", ".")).resolve()
+        depth = min(depth, 5)
+
+        def build_tree(dir_path: Path, current_depth: int) -> list[dict]:
+            if current_depth > depth:
+                return []
+            result = []
+            for entry in sorted(dir_path.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+                if entry.name.startswith(".") and entry.name not in (".ralph",):
+                    continue
+                if entry.name in ("node_modules", "__pycache__", ".git", ".next", "venv", ".venv"):
+                    continue
+                node = {
+                    "name": entry.name,
+                    "type": "dir" if entry.is_dir() else "file",
+                    "path": str(entry.relative_to(project_dir)),
+                }
+                if entry.is_dir() and current_depth < depth:
+                    node["children"] = build_tree(entry, current_depth + 1)
+                result.append(node)
+            return result
+
+        return {"tree": build_tree(project_dir, 1)}
+
     return app
+
+
+def _analyze_project(project_path: Path) -> dict:
+    """轻量级代码库侦察。"""
+    import json as _json
+
+    stats: dict[str, int] = {}
+    key_files: dict[str, bool] = {}
+    total_files = 0
+
+    for ext in ["py", "ts", "tsx", "js", "jsx", "css", "html", "md", "json", "yaml", "yml", "sql", "go", "rs", "java"]:
+        stats[ext] = 0
+
+    key_patterns = [
+        "package.json", "pyproject.toml", "Cargo.toml", "go.mod",
+        "tsconfig.json", "next.config.ts", "vite.config.ts",
+        "README.md", "ARCHITECTURE.md", "Makefile", "Dockerfile",
+        ".github/workflows",
+    ]
+
+    for f in project_path.rglob("*"):
+        if f.is_file() and not any(p in f.parts for p in [".git", "node_modules", "__pycache__", ".next", "venv"]):
+            total_files += 1
+            ext = f.suffix.lstrip(".") or "other"
+            stats[ext] = stats.get(ext, 0) + 1
+
+            for kp in key_patterns:
+                if str(f.relative_to(project_path)).endswith(kp) or kp in str(f):
+                    key_files[str(f.relative_to(project_path))] = True
+
+    # git info
+    git_info = {}
+    import subprocess
+    try:
+        git_info["branch"] = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=project_path, text=True, timeout=5,
+        ).strip()
+        git_info["last_commit"] = subprocess.check_output(
+            ["git", "log", "-1", "--format=%s"],
+            cwd=project_path, text=True, timeout=5,
+        ).strip()
+    except Exception:
+        git_info = {"branch": "unknown", "last_commit": ""}
+
+    return {
+        "project_name": project_path.name,
+        "total_files": total_files,
+        "file_stats": {k: v for k, v in stats.items() if v > 0},
+        "key_files": list(key_files.keys()),
+        "git": git_info,
+    }
 
 
 def _serialize_work_unit(unit: Any) -> dict:

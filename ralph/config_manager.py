@@ -200,3 +200,132 @@ class RalphConfigManager:
     def save_issue_policy(self, policy: dict) -> dict:
         self._write_json("issue-policy.json", policy)
         return policy
+
+    # --- Recent Projects ---
+
+    def list_recent_projects(self) -> list[dict]:
+        return self._read_json("recent-projects.json", [])
+
+    def add_recent_project(self, project_path: str, name: str = "") -> None:
+        projects = self.list_recent_projects()
+        # 去重 + 移到最前
+        projects = [p for p in projects if p.get("path") != project_path]
+        projects.insert(0, {
+            "name": name or Path(project_path).name,
+            "path": project_path,
+            "last_opened_at": _now_iso(),
+        })
+        # 最多保留 20 个
+        self._write_json("recent-projects.json", projects[:20])
+
+    def remove_recent_project(self, project_path: str) -> None:
+        projects = [p for p in self.list_recent_projects() if p.get("path") != project_path]
+        self._write_json("recent-projects.json", projects)
+
+    # --- Project Analysis ---
+
+    def save_analysis(self, project_path: str, analysis: dict) -> dict:
+        data = {"project_path": project_path, "analysis": analysis, "analyzed_at": _now_iso()}
+        self._write_json("analysis.json", data)
+        return data
+
+    def get_analysis(self) -> dict | None:
+        return self._read_json("analysis.json")
+
+    # --- Agent Definitions ---
+
+    def list_agent_definitions(self) -> list[dict]:
+        return self._read_json("agent-definitions.json", [])
+
+    def save_agent_definition(self, agent_def: dict) -> dict:
+        agent_def["updated_at"] = _now_iso()
+        defs = self.list_agent_definitions()
+        for i, d in enumerate(defs):
+            if d.get("role") == agent_def.get("role"):
+                defs[i] = agent_def
+                break
+        else:
+            defs.append(agent_def)
+        self._write_json("agent-definitions.json", defs)
+        return agent_def
+
+    def delete_agent_definition(self, role: str) -> bool:
+        defs = [d for d in self.list_agent_definitions() if d.get("role") != role]
+        if len(defs) == len(self.list_agent_definitions()):
+            return False
+        self._write_json("agent-definitions.json", defs)
+        return True
+
+    # --- Agent-Level Provider Config ---
+
+    def list_agent_providers(self) -> dict:
+        return self._read_json("agent-providers.json", {})
+
+    def get_agent_provider(self, agent_id: str) -> dict | None:
+        providers = self.list_agent_providers()
+        return providers.get(agent_id)
+
+    def save_agent_provider(self, agent_id: str, config: dict) -> dict:
+        providers = self.list_agent_providers()
+        config["updated_at"] = _now_iso()
+        providers[agent_id] = config
+        self._write_json("agent-providers.json", providers)
+        return config
+
+    def resolve_agent_provider(self, agent_role: str, task_type: str = "") -> dict:
+        """解析 agent 的 LLM provider：agent 级覆盖 > ModelAssignment > 第一个启用的 provider。"""
+        # 1. Agent 级覆盖
+        agent_config = self.get_agent_provider(agent_role)
+        if agent_config and agent_config.get("enabled"):
+            return {
+                "provider_id": agent_config.get("provider_id", ""),
+                "model": agent_config.get("model", ""),
+                "base_url": agent_config.get("overrides", {}).get("base_url", ""),
+                "source": "agent_override",
+            }
+
+        # 2. ModelAssignment
+        if task_type:
+            assignments = self.list_assignments()
+            for a in assignments:
+                if a.get("task_type") == task_type:
+                    return {
+                        "provider_id": a.get("provider_id", ""),
+                        "model": a.get("model", ""),
+                        "source": "model_assignment",
+                    }
+
+        # 3. 第一个启用的 provider
+        providers = self.list_providers()
+        for p in providers:
+            if p.get("enabled"):
+                return {
+                    "provider_id": p.get("id", ""),
+                    "model": p.get("default_model", ""),
+                    "source": "default_provider",
+                }
+
+        return {"provider_id": "", "model": "", "source": "none"}
+
+    # --- Scheduling Timeline ---
+
+    def append_scheduling_event(self, event: dict) -> None:
+        import json as _json
+        event["timestamp"] = _now_iso()
+        path = self._dir / "scheduling-timeline.jsonl"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(event, ensure_ascii=False) + "\n")
+
+    def get_scheduling_timeline(self, limit: int = 100) -> list[dict]:
+        import json as _json
+        path = self._dir / "scheduling-timeline.jsonl"
+        if not path.is_file():
+            return []
+        events = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    events.append(_json.loads(line.strip()))
+                except _json.JSONDecodeError:
+                    continue
+        return events[-limit:]
