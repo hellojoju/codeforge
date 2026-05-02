@@ -28,6 +28,7 @@ from dashboard.consumer import CommandConsumer
 from dashboard.event_bus import EventBus
 from dashboard.models import ChatMessage, Command, Event, ModuleAssignment
 from dashboard.state_repository import ProjectStateRepository
+from ralph.config_manager import RalphConfigManager
 from ralph.report_generator import ReportGenerator
 from ralph.repository import RalphRepository
 from ralph.schema.work_unit import WorkUnitStatus
@@ -153,6 +154,10 @@ def create_dashboard_app(
     # 注入 ReportGenerator
     report_generator = ReportGenerator(ralph_repository._ralph_dir)
     app.state.report_generator = report_generator
+
+    # 注入 ConfigManager
+    config_manager = RalphConfigManager(ralph_repository._ralph_dir)
+    app.state.config_manager = config_manager
 
     # 注入 Repository
     if repository is None:
@@ -994,6 +999,98 @@ def create_dashboard_app(
             "content": content,
             "size_bytes": report_path.stat().st_size,
         }
+
+    # --- Ralph API: 事件历史端点 ---
+
+    @app.get("/api/ralph/events")
+    async def ralph_list_events(limit: int = 50, after_id: int = 0) -> list[dict]:
+        """查询事件历史（用于前端恢复/翻历史日志）。"""
+        repo: ProjectStateRepository = app.state.repository
+        events = repo.get_events_after(after_id, limit=limit)
+        return [e.to_dict() for e in events]
+
+    # --- Ralph API: 配置端点 ---
+
+    # Providers
+
+    @app.get("/api/ralph/settings/providers")
+    async def ralph_list_providers() -> list[dict]:
+        """列出所有 LLM Provider。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.list_providers()
+
+    @app.post("/api/ralph/settings/providers")
+    async def ralph_create_provider(body: dict[str, Any]) -> dict:
+        """创建/更新 LLM Provider。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        provider_id = body.get("id", "")
+        if not provider_id:
+            raise HTTPException(status_code=422, detail="provider id is required")
+        return cfg.save_provider(body)
+
+    @app.put("/api/ralph/settings/providers/{provider_id}")
+    async def ralph_update_provider(provider_id: str, body: dict[str, Any]) -> dict:
+        """更新指定 LLM Provider。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        body["id"] = provider_id
+        return cfg.save_provider(body)
+
+    @app.delete("/api/ralph/settings/providers/{provider_id}")
+    async def ralph_delete_provider(provider_id: str) -> dict:
+        """删除指定 LLM Provider。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        ok = cfg.delete_provider(provider_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"Provider {provider_id} not found")
+        return {"success": True}
+
+    @app.post("/api/ralph/settings/providers/{provider_id}/test")
+    async def ralph_test_provider(provider_id: str) -> dict:
+        """测试指定 Provider 的连通性。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.test_provider_connection(provider_id)
+
+    # Model Assignments
+
+    @app.get("/api/ralph/settings/model-assignments")
+    async def ralph_list_assignments() -> list[dict]:
+        """列出模型路由规则。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.list_assignments()
+
+    @app.put("/api/ralph/settings/model-assignments")
+    async def ralph_save_assignments(body: list[dict]) -> list[dict]:
+        """保存模型路由规则。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.save_assignments(body)
+
+    # Toolchain
+
+    @app.get("/api/ralph/settings/toolchain")
+    async def ralph_get_toolchain() -> dict:
+        """获取工具链配置。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.get_toolchain()
+
+    @app.put("/api/ralph/settings/toolchain")
+    async def ralph_save_toolchain(body: dict[str, Any]) -> dict:
+        """保存工具链配置。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.save_toolchain(body)
+
+    # Issue Policy
+
+    @app.get("/api/ralph/settings/issue-policy")
+    async def ralph_get_issue_policy() -> dict:
+        """获取 Issue 治理策略。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.get_issue_policy()
+
+    @app.put("/api/ralph/settings/issue-policy")
+    async def ralph_save_issue_policy(body: dict[str, Any]) -> dict:
+        """保存 Issue 治理策略。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.save_issue_policy(body)
 
     return app
 

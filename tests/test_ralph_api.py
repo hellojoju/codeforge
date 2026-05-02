@@ -785,3 +785,230 @@ async def test_ralph_get_report_path_traversal(client):
     # 使用 %2E%2E 编码绕过 Starlette 的路径规范化
     resp = await client.get("/api/ralph/reports/%2E%2E/%2E%2E/etc/passwd")
     assert resp.status_code == 403
+
+
+# ==================== Events API Tests ====================
+
+
+async def test_ralph_list_events_empty(client):
+    """空事件列表返回空数组。"""
+    resp = await client.get("/api/ralph/events")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_ralph_list_events_with_data(client, repo):
+    """创建事件后可通过 API 查询。"""
+    # 直接向 repository 写入事件
+    repo.append_event(type="test_event", payload={"key": "value"})
+
+    resp = await client.get("/api/ralph/events")
+    assert resp.status_code == 200
+    events = resp.json()
+    assert len(events) >= 1
+    assert "event_id" in events[0]
+    assert "type" in events[0]
+    assert "timestamp" in events[0]
+
+
+async def test_ralph_list_events_with_limit(client):
+    """limit 参数生效。"""
+    resp = await client.get("/api/ralph/events?limit=3")
+    assert resp.status_code == 200
+    events = resp.json()
+    assert len(events) <= 3
+
+
+async def test_ralph_list_events_after_id(client, repo):
+    """after_id 参数生效。"""
+    repo.append_event(type="e1")
+    repo.append_event(type="e2")
+    repo.append_event(type="e3")
+
+    resp_all = await client.get("/api/ralph/events")
+    all_events = resp_all.json()
+
+    if len(all_events) > 1:
+        first_id = all_events[0]["event_id"]
+        resp = await client.get(f"/api/ralph/events?after_id={first_id}")
+        after_events = resp.json()
+        ids = [e["event_id"] for e in after_events]
+        assert first_id not in ids
+
+
+# ==================== Settings API Tests ====================
+
+
+async def test_ralph_list_providers_empty(client):
+    """默认 Provider 列表为空。"""
+    resp = await client.get("/api/ralph/settings/providers")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_ralph_create_provider(client):
+    """创建 Provider。"""
+    resp = await client.post(
+        "/api/ralph/settings/providers",
+        json={
+            "id": "test-provider",
+            "name": "Test Provider",
+            "base_url": "https://api.test.com",
+            "api_key": "sk-test",
+            "default_model": "test-model",
+            "models": ["test-model", "test-model-mini"],
+            "enabled": True,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["id"] == "test-provider"
+    assert data["name"] == "Test Provider"
+    assert "updated_at" in data
+
+
+async def test_ralph_list_providers_after_create(client):
+    """创建后列表包含该项目。"""
+    await client.post(
+        "/api/ralph/settings/providers",
+        json={"id": "p1", "name": "P1", "base_url": "https://a.com"},
+    )
+    resp = await client.get("/api/ralph/settings/providers")
+    assert resp.status_code == 200
+    assert len(resp.json()) >= 1
+
+
+async def test_ralph_update_provider(client):
+    """更新 Provider。"""
+    await client.post(
+        "/api/ralph/settings/providers",
+        json={"id": "update-me", "name": "Old", "base_url": "https://old.com"},
+    )
+    resp = await client.put(
+        "/api/ralph/settings/providers/update-me",
+        json={"name": "New", "base_url": "https://new.com"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "New"
+    assert data["base_url"] == "https://new.com"
+
+
+async def test_ralph_delete_provider(client):
+    """删除 Provider。"""
+    await client.post(
+        "/api/ralph/settings/providers",
+        json={"id": "delete-me", "name": "Temp", "base_url": "https://temp.com"},
+    )
+    resp = await client.delete("/api/ralph/settings/providers/delete-me")
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+
+    # 确认已删除
+    list_resp = await client.get("/api/ralph/settings/providers")
+    ids = [p["id"] for p in list_resp.json()]
+    assert "delete-me" not in ids
+
+
+async def test_ralph_delete_provider_not_found(client):
+    """删除不存在的 Provider 返回 404。"""
+    resp = await client.delete("/api/ralph/settings/providers/nonexistent")
+    assert resp.status_code == 404
+
+
+async def test_ralph_test_provider(client):
+    """测试 Provider 连通性。"""
+    await client.post(
+        "/api/ralph/settings/providers",
+        json={"id": "conn-test", "name": "CT", "base_url": "https://api.test.com"},
+    )
+    resp = await client.post("/api/ralph/settings/providers/conn-test/test")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "ok" in data
+
+
+async def test_ralph_test_provider_not_found(client):
+    """测试不存在的 Provider 返回错误。"""
+    resp = await client.post("/api/ralph/settings/providers/nonexistent/test")
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is False
+
+
+# --- Model Assignments ---
+
+
+async def test_ralph_list_assignments_empty(client):
+    """默认路由规则为空。"""
+    resp = await client.get("/api/ralph/settings/model-assignments")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_ralph_save_assignments(client):
+    """保存模型路由规则。"""
+    assignments = [
+        {"task_type": "brainstorm", "provider_id": "claude", "model": "haiku"},
+        {"task_type": "code_gen", "provider_id": "deepseek", "model": "v4"},
+    ]
+    resp = await client.put(
+        "/api/ralph/settings/model-assignments",
+        json=assignments,
+    )
+    assert resp.status_code == 200
+    assert len(resp.json()) == 2
+
+    # 验证持久化
+    get_resp = await client.get("/api/ralph/settings/model-assignments")
+    assert len(get_resp.json()) == 2
+
+
+# --- Toolchain ---
+
+
+async def test_ralph_get_toolchain_default(client):
+    """默认工具链配置。"""
+    resp = await client.get("/api/ralph/settings/toolchain")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "enabled_tools" in data
+    assert "claude_code" in data["enabled_tools"]
+
+
+async def test_ralph_save_toolchain(client):
+    """保存工具链配置。"""
+    config = {
+        "enabled_tools": ["claude_code", "codex"],
+        "priority": ["claude_code"],
+        "fallback_strategy": "auto_switch",
+    }
+    resp = await client.put("/api/ralph/settings/toolchain", json=config)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["enabled_tools"] == ["claude_code", "codex"]
+    assert data["fallback_strategy"] == "auto_switch"
+
+
+# --- Issue Policy ---
+
+
+async def test_ralph_get_issue_policy_default(client):
+    """默认 Issue 策略。"""
+    resp = await client.get("/api/ralph/settings/issue-policy")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "issue_sources" in data
+    assert "local" in data["issue_sources"]
+
+
+async def test_ralph_save_issue_policy(client):
+    """保存 Issue 策略。"""
+    policy = {
+        "issue_sources": ["local", "github"],
+        "classification_rules": {"bug": "auto_fix", "feature": "require_approval"},
+        "pull_interval": "daily",
+    }
+    resp = await client.put("/api/ralph/settings/issue-policy", json=policy)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["classification_rules"]["bug"] == "auto_fix"
