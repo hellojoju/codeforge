@@ -1577,6 +1577,36 @@ def create_dashboard_app(
             "source": i.source, "status": i.status,
         } for i in issues]
 
+    # --- Ralph API: Source Docs Check + Coupling Analyzer 端点 ---
+
+    @app.post("/api/ralph/source-docs/scan")
+    async def ralph_source_docs_scan(body: dict[str, Any]) -> dict:
+        from ralph.source_docs_check import SourceDocsCheck
+        project_path = Path(body.get("path", os.environ.get("PROJECT_DIR", ".")))
+        checker = SourceDocsCheck()
+        deps = [{"name": d.name, "version": d.version, "category": d.category}
+                for d in checker.scan_dependencies(project_path)]
+        docs = [{"topic": d.topic, "url": d.url, "notes": d.notes}
+                for d in checker.get_all_docs(deps)]
+        return {"dependencies": deps, "docs_sources": docs,
+                "report": checker.markdown_report(project_path)}
+
+    @app.post("/api/ralph/coupling/analyze")
+    async def ralph_coupling_analyze(body: dict[str, Any]) -> dict:
+        from ralph.coupling_analyzer import CouplingAnalyzer
+        project_path = Path(body.get("path", os.environ.get("PROJECT_DIR", ".")))
+        analyzer = CouplingAnalyzer()
+        modules = analyzer.analyze(project_path)
+        return {
+            "modules": [
+                {"name": m.name, "file_count": m.file_count,
+                 "import_degree": m.import_degree, "dependents": m.dependents,
+                 "risk_score": m.risk_score}
+                for m in modules
+            ],
+            "parallelization": analyzer.suggest_parallelization(modules),
+        }
+
     return app
 
 
