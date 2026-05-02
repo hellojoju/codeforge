@@ -1301,6 +1301,126 @@ def create_dashboard_app(
 
         return {"tree": build_tree(project_dir, 1)}
 
+    # --- Ralph API: Brainstorm 端点 ---
+
+    @app.get("/api/ralph/brainstorm/sessions")
+    async def ralph_list_brainstorm_sessions() -> list[dict]:
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        from ralph.brainstorm_manager import BrainstormManager
+        return BrainstormManager(ralph_dir).list_sessions()
+
+    @app.post("/api/ralph/brainstorm/start")
+    async def ralph_start_brainstorm(body: dict[str, Any]) -> dict:
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        from ralph.brainstorm_manager import BrainstormManager
+        mgr = BrainstormManager(ralph_dir)
+        record = mgr.start_session(
+            body.get("project_name", "Unnamed"),
+            body.get("user_message", ""),
+        )
+        questions = mgr.generate_questions(record)
+        summary = mgr.get_summary(record)
+        return {"record_id": record.record_id, "questions": questions, "summary": summary}
+
+    @app.post("/api/ralph/brainstorm/respond")
+    async def ralph_brainstorm_respond(body: dict[str, Any]) -> dict:
+        record_id = body.get("record_id", "")
+        if not record_id:
+            raise HTTPException(status_code=422, detail="record_id required")
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        from ralph.brainstorm_manager import BrainstormManager
+        mgr = BrainstormManager(ralph_dir)
+        record = mgr.load(record_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Record not found")
+        updated = mgr.process_response(record, body.get("user_response", ""),
+                                        body.get("extracted_facts"))
+        questions = mgr.generate_questions(updated)
+        is_complete = mgr.is_complete(updated)
+        return {
+            "record_id": updated.record_id, "round": updated.round_number,
+            "questions": questions, "is_complete": is_complete,
+            "completeness": updated.completeness_score(),
+            "summary": mgr.get_summary(updated),
+        }
+
+    # --- Ralph API: PRD 端点 ---
+
+    @app.get("/api/ralph/prd/list")
+    async def ralph_list_prds() -> list[dict]:
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        from ralph.prd_manager import PRDManager
+        return PRDManager(ralph_dir).list_prds()
+
+    @app.post("/api/ralph/prd/generate")
+    async def ralph_generate_prd(body: dict[str, Any]) -> dict:
+        brainstorm_id = body.get("brainstorm_record_id", "")
+        if not brainstorm_id:
+            raise HTTPException(status_code=422, detail="brainstorm_record_id required")
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        from ralph.prd_manager import PRDManager
+        pm = PRDManager(ralph_dir)
+        prd = pm.generate_from_brainstorm(brainstorm_id, ralph_dir)
+        return {"prd_id": prd.prd_id, "status": prd.status, "markdown": prd.to_markdown()}
+
+    @app.post("/api/ralph/prd/freeze")
+    async def ralph_freeze_prd(body: dict[str, Any]) -> dict:
+        prd_id = body.get("prd_id", "")
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        from ralph.prd_manager import PRDManager
+        prd = PRDManager(ralph_dir).freeze(prd_id)
+        return {"prd_id": prd.prd_id, "status": prd.status, "frozen_at": prd.frozen_at}
+
+    # --- Ralph API: Task Decomposition 端点 ---
+
+    @app.post("/api/ralph/tasks/decompose")
+    async def ralph_decompose_tasks(body: dict[str, Any]) -> dict:
+        prd_id = body.get("prd_id", "")
+        if not prd_id:
+            raise HTTPException(status_code=422, detail="prd_id required")
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        from ralph.prd_manager import PRDManager
+        from ralph.task_decomposer import TaskDecomposer
+        pm = PRDManager(ralph_dir)
+        prd = pm.load(prd_id)
+        if prd is None:
+            raise HTTPException(status_code=404, detail="PRD not found")
+        td = TaskDecomposer(ralph_dir)
+        units = td.decompose(prd)
+        failures = td.validate_granularity(units)
+        dag = td.build_dependency_dag(units)
+        return {
+            "work_units": [_serialize_work_unit(u) for u in units],
+            "granularity_failures": failures,
+            "dependency_dag": dag,
+            "total": len(units),
+        }
+
+    # --- Ralph API: Memory 端点 ---
+
+    @app.get("/api/ralph/memory/status")
+    async def ralph_memory_status() -> dict:
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        from ralph.memory_archiver import MemoryArchiver
+        return MemoryArchiver(ralph_dir).get_status()
+
+    @app.get("/api/ralph/memory/search")
+    async def ralph_memory_search(q: str = "", top_k: int = 10) -> list[dict]:
+        if not q:
+            return []
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        from ralph.memory_archiver import MemoryArchiver
+        return MemoryArchiver(ralph_dir).search(q, top_k)
+
     return app
 
 
