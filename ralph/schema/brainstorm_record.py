@@ -45,12 +45,16 @@ class BrainstormRecord:
 
     def completeness_score(self) -> float:
         """需求完整度评分: 0.0-1.0"""
+        # 兼容 dict 和 ConfirmedFact 对象
+        def _topic(f):
+            return f.topic if hasattr(f, "topic") else f.get("topic", "")
+
         checks = [
             len(self.confirmed_facts) >= 3,
             len(self.open_assumptions) == 0,
             len(self.user_paths) >= 1,
-            any(f.topic == "目标用户" for f in self.confirmed_facts),
-            any(f.topic == "核心功能" for f in self.confirmed_facts),
-            any(f.topic == "验收标准" for f in self.confirmed_facts),
+            any(_topic(f) == "目标用户" for f in self.confirmed_facts),
+            any(_topic(f) == "核心功能" for f in self.confirmed_facts),
+            any(_topic(f) == "验收标准" for f in self.confirmed_facts),
         ]
         return sum(checks) / len(checks)

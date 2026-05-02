@@ -121,11 +121,24 @@ class BrainstormManager:
         for f in sorted(self._dir.glob("*.json"), reverse=True):
             try:
                 data = json.loads(f.read_text())
+                # 计算完整度时不重建对象，直接用 dict 算
+                facts = data.get("confirmed_facts", [])
+                assumptions = data.get("open_assumptions", [])
+                paths = data.get("user_paths", [])
+                checks = [
+                    len(facts) >= 3,
+                    len(assumptions) == 0,
+                    len(paths) >= 1,
+                    any(isinstance(f, dict) and f.get("topic") == "目标用户" for f in facts),
+                    any(isinstance(f, dict) and f.get("topic") == "核心功能" for f in facts),
+                    any(isinstance(f, dict) and f.get("topic") == "验收标准" for f in facts),
+                ]
+                completeness = sum(checks) / len(checks)
                 records.append({
                     "record_id": data.get("record_id", f.stem),
                     "project_name": data.get("project_name", ""),
                     "round_number": data.get("round_number", 0),
-                    "completeness": BrainstormRecord(**data).completeness_score(),
+                    "completeness": completeness,
                     "created_at": data.get("created_at", ""),
                 })
             except Exception:
@@ -136,14 +149,33 @@ class BrainstormManager:
         path = self._dir / f"{record_id}.json"
         if not path.is_file():
             return None
-        return BrainstormRecord(**json.loads(path.read_text()))
+        data = json.loads(path.read_text())
+        # 反序列化内嵌对象（跳过非 dict 条目）
+        data["confirmed_facts"] = [
+            ConfirmedFact(**f) for f in data.get("confirmed_facts", []) if isinstance(f, dict)
+        ]
+        data["open_assumptions"] = [
+            OpenAssumption(**a) for a in data.get("open_assumptions", []) if isinstance(a, dict)
+        ]
+        data["user_paths"] = [
+            UserPath(**p) for p in data.get("user_paths", []) if isinstance(p, dict)
+        ]
+        return BrainstormRecord(**data)
 
     def _save(self, record: BrainstormRecord) -> None:
         path = self._dir / f"{record.record_id}.json"
-        path.write_text(json.dumps(
-            {k: v for k, v in record.__dict__.items() if not k.startswith("_")},
-            indent=2, ensure_ascii=False, default=str,
-        ))
+        data = {}
+        for k, v in record.__dict__.items():
+            if k.startswith("_"):
+                continue
+            if isinstance(v, list):
+                data[k] = [
+                    item.__dict__ if hasattr(item, "__dict__") and not isinstance(item, dict) else item
+                    for item in v
+                ]
+            else:
+                data[k] = v
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str))
 
     @staticmethod
     def _question_for_topic(topic: str) -> str:
