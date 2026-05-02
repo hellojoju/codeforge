@@ -15,8 +15,8 @@
 
 ```
 Phase 0: 基础设施 ─────────────────── 100% ✅
-Phase 1: 可靠顺序执行 ──────────────── 95% ✅
-Phase 2: 真实可用性验收 ───────────── 60% ⏳
+Phase 1: 可靠顺序执行 ──────────────── 100% ✅
+Phase 2: 真实可用性验收 ───────────── 80% ⏳
 Phase 3: 隔离并行执行 ──────────────── 0% ❌
 Phase 4: 可视化和长期运行 ─────────── 60% ⏳
 ```
@@ -48,13 +48,13 @@ Phase 4: 可视化和长期运行 ─────────── 60% ⏳
 | ~~13-6~~ | ~~ToolAdapter 能力匹配~~ | ✅ `match()` 按 streaming/mcp/context 需求匹配 |
 | ~~13-7~~ | ~~ToolAdapter 生命周期~~ | ✅ `health_check_all()` + `downgrade()` |
 | ~~13-8~~ | ~~ToolAdapter config~~ | ✅ `ToolchainConfigLoader` 读写 .ralph/config/toolchain.json |
-| 20-3 | **LLM Provider 密钥加密** | ❌ 后端 proxy 有了，但 api_key 还是明文存 JSON |
+| ~~20-3~~ | ~~LLM Provider 密钥加密~~ | ✅ `_encrypt_api_key`/`_decrypt_api_key` + `.key` 文件 |
 | ~~20-4~~ | ~~LLM Provider 后端代理~~ | ✅ `proxy_request()` 路由到 Provider API |
 | ~~20-6~~ | ~~LLM Provider 自动降级~~ | ✅ `auto_downgrade()` 按活跃 Provider 列表切换 |
 | ~~20-8~~ | ~~LLM Provider 成本统计~~ | ✅ `_record_usage()` + `get_usage_stats()` |
 | ~~21-2~~ | ~~Issue GitHub 同步~~ | ✅ `GitHubIssueSource` 通过 GH API 拉取 |
 | ~~21-3~~ | ~~Issue 自动分类 LLM~~ | ✅ `classify_with_llm()` 调用 Claude 兜底 |
-| 21-4 | **Issue Policy 自动处理** | ❌ 策略定义了但 WorkUnitEngine 不消费 |
+| ~~21-4~~ | ~~Issue Policy 自动处理~~ | ✅ `issues_to_work_units()` 按策略生成 WorkUnit |
 | ~~9-2~~ | ~~Decision Log superseded~~ | ✅ `record_decision()` 自动 supersede 旧决策 |
 
 ---
@@ -69,7 +69,7 @@ Phase 4: 可视化和长期运行 ─────────── 60% ⏳
 | ~~4~~ | ~~控制台错误捕获~~ | ✅ `capture_console_errors()` |
 | ~~5~~ | ~~网络错误捕获~~ | ✅ `capture_network_errors()` |
 | 6 | 边界状态检查 | ✅ VerificationManager 有定义 |
-| 7 | **探索式点击测试** | ❌ 未实现 |
+| ~~7~~ | ~~探索式点击测试~~ | ✅ `exploratory_click_test()` |
 
 ---
 
