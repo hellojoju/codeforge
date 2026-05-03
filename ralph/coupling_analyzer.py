@@ -39,8 +39,18 @@ class CouplingAnalyzer:
         re.compile(r"import\s+([a-zA-Z_][\w.]*)"),
     ]
 
-    def analyze(self, project_dir: Path) -> list[ModuleCoupling]:
-        """分析整个项目的模块耦合。"""
+    def analyze(self, project_dir: Path,
+                recon_result: dict | None = None) -> list[ModuleCoupling]:
+        """分析整个项目的模块耦合。
+
+        recon_result: ReconAnalyzer.analyze() 的返回值。传入后用其中的
+                    模块信息指导分析范围，忽略非相关目录。
+        """
+        if recon_result:
+            # 用 recon 给出的模块列表指导分析
+            known_modules = {m["name"] for m in recon_result.get("modules", [])}
+            # 只分析 recon 确认存在的模块
+            self.MODULE_DIRS = [m for m in self.MODULE_DIRS if m in known_modules]
         modules = self._discover_modules(project_dir)
         edges: list[CouplingEdge] = []
         import_graph: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -76,6 +86,25 @@ class CouplingAnalyzer:
             ))
 
         return sorted(result, key=lambda m: m.risk_score, reverse=True)
+
+    def to_structured(self, modules: list[ModuleCoupling]) -> dict:
+        """输出结构化数据供 ContractManager / TaskDecomposer 消费。"""
+        return {
+            "modules": [
+                {
+                    "name": m.name,
+                    "file_count": m.file_count,
+                    "import_edges": [
+                        {"src": e.src, "dst": e.dst, "kind": e.kind, "weight": e.weight}
+                        for e in m.import_edges
+                    ],
+                    "import_degree": m.import_degree,
+                    "dependents": m.dependents,
+                    "risk_score": m.risk_score,
+                }
+                for m in modules
+            ],
+        }
 
     def suggest_parallelization(self, modules: list[ModuleCoupling]) -> dict:
         """根据耦合分析，建议可并行和必须串行的模块。"""

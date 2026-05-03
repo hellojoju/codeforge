@@ -46,9 +46,23 @@ class TaskDecomposer:
 
     def decompose(self, prd: PRDDocument,
                   codebase_analysis: dict | None = None) -> tuple[list[Story], list[WorkUnit]]:
-        """从 PRD 拆解为 Story 列表 + WorkUnit 列表。"""
+        """从 PRD 拆解为 Story 列表 + WorkUnit 列表。
+
+        codebase_analysis: 来自管道上游的结构化分析数据（recon + coupling + contracts）。
+                          传入后可自动推导 scope_allow/scope_deny/dependencies。
+        """
         stories: list[Story] = []
         work_units: list[WorkUnit] = []
+
+        # 从 coupling 分析提取高风险模块和可并行模块
+        coupling_modules = []
+        high_risk_modules: set[str] = set()
+        if codebase_analysis:
+            coupling_modules = codebase_analysis.get("coupling", {}).get("modules", [])
+            high_risk_modules = {
+                m["name"] for m in coupling_modules
+                if m.get("risk_score", 0) > 0.5
+            } | set(codebase_analysis.get("high_risk_modules", []))
 
         for i, feature in enumerate(prd.core_features):
             feature_name = feature.get("name", f"feature-{i}")
@@ -59,7 +73,12 @@ class TaskDecomposer:
                 description=feature_desc,
                 acceptance_criteria=feature.get("acceptance_criteria", []),
             )
-            sub_tasks = self._break_down_feature(feature_name, feature_desc)
+            sub_tasks = self._break_down_feature(
+                feature_name, feature_desc,
+                codebase_analysis=codebase_analysis,
+                coupling_modules=coupling_modules,
+                high_risk_modules=high_risk_modules,
+            )
             work_ids: list[str] = []
 
             for j, sub in enumerate(sub_tasks):
@@ -128,7 +147,10 @@ class TaskDecomposer:
 
         return dag
 
-    def _break_down_feature(self, name: str, description: str) -> list[dict]:
+    def _break_down_feature(self, name: str, description: str,
+                            codebase_analysis: dict | None = None,
+                            coupling_modules: list | None = None,
+                            high_risk_modules: set[str] | None = None) -> list[dict]:
         desc_lower = description.lower()
         matched_role = "backend"
         for kw, role in self.ROLE_KEYWORDS.items():
@@ -144,15 +166,39 @@ class TaskDecomposer:
         elif matched_role == "docs":
             reviewer_role = "product"
 
+        # 如果有 codebase_analysis，推导更精确的 scope 和 dependencies
+        scope = [name.lower().replace(" ", "_")]
+        dependencies: list[str] = []
+        scope_deny = [".env", "credentials.*", "*.pem", "*.key"]
+
+        if coupling_modules and high_risk_modules is not None:
+            # 如果 feature 涉及高风险模块，scope 加对应目录
+            for mod in coupling_modules:
+                if mod["name"] in name.lower() or mod["name"] in description.lower():
+                    scope.append(str(mod["name"]))
+                    if mod.get("risk_score", 0) > 0.5:
+                        reviewer_role = "architect"
+
+            # 高风险模块默认加入 scope_deny（除非显式需要修改）
+            for risk_mod in high_risk_modules:
+                if risk_mod not in scope:
+                    scope_deny.append(f"{risk_mod}/**")
+
+        # 如果有合同信息，提取依赖
+        contracts = (codebase_analysis or {}).get("contracts", [])
+        for c in contracts:
+            if any(s in name.lower() for s in [c.get("name", "").lower()]):
+                dependencies.append(c["contract_id"])
+
         return [{
             "title": name,
             "description": description or name,
-            "scope": [name.lower().replace(" ", "_")],
+            "scope": scope,
             "acceptance_criteria": [f"验收: {description}"],
             "producer_role": matched_role,
             "reviewer_role": reviewer_role,
-            "dependencies": [],
-            "scope_deny": [".env", "credentials.*", "*.pem", "*.key"],
+            "dependencies": dependencies,
+            "scope_deny": scope_deny,
             "test_command": "pytest",
             "rollback_strategy": "git checkout -- .",
         }]

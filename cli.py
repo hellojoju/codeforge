@@ -1,11 +1,11 @@
-"""CLI入口 - ai-dev命令
+"""CodeForge CLI — AI 全自动开发平台
 
 用法:
-    ai-dev "我想做一个任务管理系统"
-    ai-dev --status
-    ai-dev --init "我想做一个博客系统" --dir ./my-blog
-    ai-dev --run
-    ai-dev --dashboard      # 启动 Dashboard 后端 + WebSocket
+    codeforge "我想做一个任务管理系统"
+    codeforge --status
+    codeforge --init "我想做一个博客系统" --dir ./my-blog
+    codeforge --run
+    codeforge --dashboard      # 启动 Dashboard 后端 + WebSocket
 """
 
 from contextlib import AbstractContextManager, contextmanager
@@ -124,7 +124,7 @@ def init(
 
     console.print(f"\n[bold]PRD已保存到:[/bold] {project_dir / 'data' / 'prd.md'}")
     console.print(f"[bold]Feature列表已保存到:[/bold] {project_dir / 'data' / 'features.json'}")
-    console.print(f"\n[bold]下一步:[/bold] 运行 [green]ai-dev --run --dir {directory}[/green] 开始开发")
+    console.print(f"\n[bold]下一步:[/bold] 运行 [green]codeforge --run --dir {directory}[/green] 开始开发")
 
 
 @app.command()

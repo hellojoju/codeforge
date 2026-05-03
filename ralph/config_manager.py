@@ -242,6 +242,8 @@ class RalphConfigManager:
             "enabled_tools": ["claude_code"],
             "priority": [],
             "fallback_strategy": "manual",
+            "task_assignments": {},
+            "max_parallel": 3,
         })
 
     def save_toolchain(self, config: dict) -> dict:
@@ -367,6 +369,33 @@ class RalphConfigManager:
 
         return {"provider_id": "", "model": "", "source": "none"}
 
+    # --- Issue Tracker Config ---
+
+    def get_issue_tracker_config(self) -> dict:
+        """获取 Issue Tracker 配置。"""
+        return self._read_json("issue-tracker.json", {
+            "repo": "",
+            "token": "",
+            "label_policy": {},
+            "auto_sync": False,
+            "webhook_secret": "",
+        })
+
+    def save_issue_tracker_config(self, config: dict) -> dict:
+        """保存 Issue Tracker 配置（屏蔽 token 回显）。"""
+        stored = self._read_json("issue-tracker.json", {})
+        if config.get("token"):
+            stored["token"] = config["token"]
+        stored["repo"] = config.get("repo", stored.get("repo", ""))
+        stored["label_policy"] = config.get("label_policy", stored.get("label_policy", {}))
+        stored["auto_sync"] = config.get("auto_sync", stored.get("auto_sync", False))
+        stored["webhook_secret"] = config.get("webhook_secret", stored.get("webhook_secret", ""))
+        self._write_json("issue-tracker.json", stored)
+        safe = dict(stored)
+        safe.pop("token", None)
+        safe.pop("webhook_secret", None)
+        return safe
+
     # --- Scheduling Timeline ---
 
     def append_scheduling_event(self, event: dict) -> None:
@@ -451,13 +480,83 @@ class RalphConfigManager:
         # 粗略估算：输入 $3/M, 输出 $15/M (以 Claude Opus 4.5 为参考)
         estimated_cost = (total_input / 1_000_000 * 3.0) + (total_output / 1_000_000 * 15.0)
 
+        # 今日用量
+        today = _now_iso()[:10]
+        today_log = [e for e in log if e.get("timestamp", "").startswith(today)]
+        today_input = sum(e.get("input_tokens", 0) for e in today_log)
+        today_output = sum(e.get("output_tokens", 0) for e in today_log)
+        today_total = sum(e.get("total_tokens", 0) for e in today_log)
+
         return {
             "total_calls": len(log),
             "total_input_tokens": total_input,
             "total_output_tokens": total_output,
             "total_cost": round(estimated_cost, 2),
+            "today": {
+                "calls": len(today_log),
+                "input_tokens": today_input,
+                "output_tokens": today_output,
+                "total_tokens": today_total,
+            },
             "recent": log[-20:],
         }
+
+    def get_budget_config(self) -> dict:
+        """获取预算配置。"""
+        budget = self._read_json("budget-config.json",
+                                 {"daily_token_limit": 1_000_000,
+                                  "daily_cost_limit": 10.0,
+                                  "enabled": False})
+        stats = self.get_usage_stats()
+        today_tokens = stats.get("today", {}).get("total_tokens",
+                        stats.get("today", {}).get("input_tokens", 0) +
+                        stats.get("today", {}).get("output_tokens", 0))
+        return {
+            **budget,
+            "today_tokens_used": today_tokens,
+            "today_cost_estimated": stats.get("today", {}).get("input_tokens", 0) / 1_000_000 * 3.0
+                                  + stats.get("today", {}).get("output_tokens", 0) / 1_000_000 * 15.0,
+            "over_budget": (
+                (budget.get("daily_token_limit", 0) and today_tokens > budget["daily_token_limit"])
+            ) if budget.get("enabled") else False,
+        }
+
+    def check_budget(self) -> dict:
+        """检查当前 token 用量是否超限。
+
+        Returns:
+            {"allowed": True/False, "reason": "", "today_tokens": N, "daily_limit": N}
+        """
+        budget = self.get_budget_config()
+        if not budget.get("enabled"):
+            return {"allowed": True, "reason": "budget_check_disabled"}
+
+        over = budget.get("over_budget", False)
+        reason_parts = []
+
+        daily_limit = budget.get("daily_token_limit", 0)
+        today_tokens = budget.get("today_tokens_used", 0)
+        if daily_limit and today_tokens >= daily_limit:
+            reason_parts.append(f"每日 token 限额 {daily_limit} 已达 ({today_tokens})")
+
+        cost_limit = budget.get("daily_cost_limit", 0)
+        today_cost = budget.get("today_cost_estimated", 0)
+        if cost_limit and today_cost >= cost_limit:
+            reason_parts.append(f"每日费用限额 ${cost_limit} 已达 (${today_cost:.2f})")
+
+        return {
+            "allowed": not over,
+            "over_budget": over,
+            "reason": "; ".join(reason_parts) if reason_parts else ("超限" if over else ""),
+            "today_tokens": today_tokens,
+            "daily_token_limit": daily_limit,
+            "today_cost": today_cost,
+            "daily_cost_limit": cost_limit,
+        }
+        current.update(config)
+        self._write_json("budget-config.json", {k: v for k, v in current.items()
+                         if k in ("daily_token_limit", "daily_cost_limit", "enabled")})
+        return self.get_budget_config()
 
     def auto_downgrade(self, provider_id: str) -> dict | None:
         """当主 Provider 失败时，自动切换到下一个启用的 Provider。"""

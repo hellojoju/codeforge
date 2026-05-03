@@ -11,6 +11,7 @@ Phase 3 六项全部实现：
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -23,7 +24,10 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+LifecycleHook = Callable[[str, dict[str, Any]], None]
+"""生命周期 hook 类型。event: before_create|after_create|before_remove|after_remove|before_merge|after_merge|before_cleanup|after_cleanup"""
 
 logger = logging.getLogger(__name__)
 
@@ -97,9 +101,28 @@ class WorktreeManager:
         self._repo = repo_dir
         self._wt_dir = worktrees_dir or (repo_dir / ".worktrees")
         self._wt_dir.mkdir(parents=True, exist_ok=True)
+        self._hooks: dict[str, list[LifecycleHook]] = defaultdict(list)
+
+    def register_hook(self, event: str, hook: LifecycleHook) -> None:
+        """注册生命周期 hook。
+
+        events: before_create, after_create, before_remove, after_remove,
+                before_merge, after_merge, before_cleanup, after_cleanup
+        """
+        if event in ("before_create", "after_create", "before_remove", "after_remove",
+                     "before_merge", "after_merge", "before_cleanup", "after_cleanup"):
+            self._hooks[event].append(hook)
+
+    def _run_hooks(self, event: str, **kwargs: Any) -> None:
+        for hook in self._hooks.get(event, []):
+            try:
+                hook(event, kwargs)
+            except Exception as e:
+                logger.warning("Hook %s failed for event %s: %s", getattr(hook, "__name__", "?"), event, e)
 
     def create(self, name: str, base_branch: str = "main") -> WorktreeInfo | None:
         """创建新的 worktree 和分支。"""
+        self._run_hooks("before_create", name=name, base_branch=base_branch)
         branch = f"parallel/{name}/{int(time.time())}"
         wt_path = self._wt_dir / name
 
@@ -115,7 +138,9 @@ class WorktreeManager:
                 ["git", "worktree", "add", str(wt_path), branch],
                 cwd=self._repo, capture_output=True, timeout=30,
             )
-            return WorktreeInfo(name=name, path=wt_path, branch=branch)
+            info = WorktreeInfo(name=name, path=wt_path, branch=branch)
+            self._run_hooks("after_create", name=name, branch=branch, path=str(wt_path), info=info)
+            return info
         except subprocess.TimeoutExpired:
             logger.error("Worktree creation timeout: %s", name)
             return None
@@ -125,6 +150,7 @@ class WorktreeManager:
 
     def remove(self, name: str) -> bool:
         """删除 worktree。"""
+        self._run_hooks("before_remove", name=name)
         wt_path = self._wt_dir / name
         if not wt_path.is_dir():
             return False
@@ -132,9 +158,11 @@ class WorktreeManager:
             subprocess.run(["git", "worktree", "remove", str(wt_path)],
                            cwd=self._repo, capture_output=True, timeout=30)
             shutil.rmtree(wt_path, ignore_errors=True)
+            self._run_hooks("after_remove", name=name, success=True)
             return True
         except Exception:
             shutil.rmtree(wt_path, ignore_errors=True)
+            self._run_hooks("after_remove", name=name, success=False)
             return False
 
     def list_active(self) -> list[WorktreeInfo]:
@@ -160,6 +188,7 @@ class WorktreeManager:
 
     def cleanup_stale(self, max_age_hours: int = 24) -> int:
         """清理过期的 worktree。"""
+        self._run_hooks("before_cleanup", max_age_hours=max_age_hours)
         count = 0
         for tree in self.list_active():
             try:
@@ -169,7 +198,115 @@ class WorktreeManager:
                         count += 1
             except OSError:
                 continue
+        self._run_hooks("after_cleanup", removed_count=count)
         return count
+
+    def merge_back(self, name: str, target_branch: str = "main",
+                   strategy: str = "auto") -> dict:
+        """将 worktree 的改动合并回目标分支。
+
+        strategy:
+          - auto: 优先 git merge，冲突时回退到 patch merge
+          - merge: 只尝试 git merge
+          - patch: 用 diff + apply 方式合并
+        """
+        self._run_hooks("before_merge", name=name, target_branch=target_branch, strategy=strategy)
+
+        wt_path = self._wt_dir / name
+        if not wt_path.is_dir():
+            return {"success": False, "error": f"Worktree {name} not found"}
+
+        branch = f"parallel/{name}"
+
+        if strategy == "patch":
+            result = self._patch_merge(name, target_branch)
+            self._run_hooks("after_merge", name=name, target_branch=target_branch,
+                            strategy="patch", result=result)
+            return result
+
+        try:
+            subprocess.run(["git", "checkout", target_branch], cwd=self._repo,
+                           capture_output=True, timeout=30)
+            result = subprocess.run(
+                ["git", "merge", branch, "--no-edit"],
+                cwd=self._repo, capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode == 0:
+                ret = {"success": True, "strategy": "merge", "message": "Clean merge"}
+                self._run_hooks("after_merge", name=name, target_branch=target_branch,
+                                strategy="merge", result=ret)
+                return ret
+
+            if strategy == "auto":
+                logger.warning("Merge conflict for %s, falling back to patch merge", name)
+                subprocess.run(["git", "merge", "--abort"], cwd=self._repo,
+                               capture_output=True, timeout=30)
+                result = self._patch_merge(name, target_branch)
+                self._run_hooks("after_merge", name=name, target_branch=target_branch,
+                                strategy="patch", result=result)
+                return result
+
+            return {"success": False, "strategy": "merge", "error": "Merge conflict",
+                    "conflict_files": self._detect_worktree_conflicts()}
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Merge timeout"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _patch_merge(self, name: str, target_branch: str = "main") -> dict:
+        """用 patch 方式合并（diff + apply），避免冲突。"""
+        wt_path = self._wt_dir / name
+        if not wt_path.is_dir():
+            return {"success": False, "error": f"Worktree {name} not found"}
+
+        try:
+            # 从 worktree 的 HEAD 生成 patch
+            diff = subprocess.run(
+                ["git", "diff", target_branch, f"refs/heads/parallel/{name}", "--binary"],
+                cwd=self._repo, capture_output=True, text=True, timeout=30,
+            )
+
+            if not diff.stdout.strip():
+                return {"success": True, "strategy": "patch", "message": "No changes to merge"}
+
+            # 切回 target 分支并 apply
+            subprocess.run(["git", "checkout", target_branch], cwd=self._repo,
+                           capture_output=True, timeout=30)
+
+            apply = subprocess.run(
+                ["git", "apply", "--3way", "--allow-empty"],
+                cwd=self._repo, input=diff.stdout, capture_output=True, text=True, timeout=60,
+            )
+
+            if apply.returncode == 0:
+                subprocess.run(["git", "add", "-A"], cwd=self._repo,
+                               capture_output=True, timeout=30)
+                subprocess.run(
+                    ["git", "commit", "-m", f"patch merge: {name} from parallel/{name}"],
+                    cwd=self._repo, capture_output=True, timeout=30,
+                )
+                return {"success": True, "strategy": "patch",
+                        "files_changed": len(diff.stdout.strip().split("\n\n"))}
+            else:
+                subprocess.run(["git", "apply", "--abort"], cwd=self._repo,
+                               capture_output=True, timeout=10)
+                return {"success": False, "strategy": "patch",
+                        "error": f"Patch apply failed: {apply.stderr[:200]}"}
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Patch merge timeout"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _detect_worktree_conflicts(self) -> list[str]:
+        """检测合并冲突文件。"""
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "--diff-filter=U"],
+                cwd=self._repo, capture_output=True, text=True, timeout=10,
+            )
+            return [f.strip() for f in result.stdout.strip().split("\n") if f.strip()]
+        except Exception:
+            return []
 
 
 # ==================== 3. 并行任务调度 ====================
@@ -384,8 +521,9 @@ class RegressionTester:
 class ParallelOrchestrator:
     """Phase 3 并行执行编排器，整合全部 6 项能力。"""
 
-    def __init__(self, repo_dir: Path, max_parallel: int = 3):
+    def __init__(self, repo_dir: Path, max_parallel: int = 3, work_unit_engine=None):
         self.repo = repo_dir
+        self._wue = work_unit_engine
         self.worktree_mgr = WorktreeManager(repo_dir)
         self.executor = ParallelExecutor(max_parallel=max_parallel)
         self.integration = IntegrationQueue()
@@ -394,41 +532,70 @@ class ParallelOrchestrator:
         self._lock_dir = repo_dir / ".ralph" / "locks"
         self._lock_dir.mkdir(parents=True, exist_ok=True)
 
-    def run_parallel(self, tasks: list[ParallelTask]) -> dict:
-        """完整并行执行流程。"""
+    async def dispatch_work_units(self, work_units: list, prd_summary: str = "") -> dict:
+        """并行执行一批 WorkUnit。
+
+        按依赖拓扑分层，每层内各 WorkUnit 在独立 worktree 中并发执行，
+        每层执行完后合并回主线，最后跑回归测试。
+        """
+        # 转为并行任务
+        tasks = []
+        for wu in work_units:
+            deps = list(getattr(wu, "dependencies", []) or [])
+            tasks.append(ParallelTask(
+                task_id=wu.work_id,
+                title=getattr(wu, "title", "") or wu.work_id,
+                scope=list(getattr(wu, "scope_allow", []) or []),
+                dependencies=deps,
+            ))
+
         self.executor.add_tasks(tasks)
         layers = self.executor.schedule()
-        results = []
+        all_details = []
 
         for layer in layers:
-            batch_results = []
-            for tid in layer:
+            async def _exec_one(tid: str) -> dict:
                 task = self.executor._tasks.get(tid)
                 if not task:
-                    continue
-                # 创建 worktree
+                    return {"task_id": tid, "error": "task not found"}
+
+                # 创建 worktree 隔离
                 wt = self.worktree_mgr.create(task.task_id)
                 if wt:
                     task.worktree_name = wt.name
-                # 模拟执行（实际由 WorkUnitEngine 调用）
-                batch_results.append(task)
-                self.executor.complete(tid, True, {"merged": True})
 
-            # 集成
-            for task in batch_results:
-                if task.worktree_name:
-                    branch = f"parallel/{task.task_id}"
+                tool_cwd = wt.path if wt else None
+
+                try:
+                    if self._wue:
+                        result = await self._wue.execute(tid, prd_summary=prd_summary, tool_cwd=tool_cwd)
+                        success = result.get("success", False)
+                        self.executor.complete(tid, success, result)
+                    else:
+                        self.executor.complete(tid, True)
+                except Exception as e:
+                    logger.error("WorkUnit %s 并行执行异常: %s", tid, e)
+                    self.executor.complete(tid, False, {"error": str(e)})
+
+                return {"task_id": tid, "worktree": wt.name if wt else ""}
+
+            # 本层并发执行
+            layer_results = await asyncio.gather(*[_exec_one(tid) for tid in layer])
+
+            # 合并回主线
+            for r in layer_results:
+                if r.get("worktree"):
+                    branch = f"parallel/{r['task_id']}"
                     merge_result = self.merge_handler.merge(branch)
-                    results.append({
-                        "task_id": task.task_id,
-                        "merge": merge_result,
-                    })
-                    self.worktree_mgr.remove(task.task_id)
+                    r["merge"] = merge_result
+                    self.worktree_mgr.remove(r["task_id"])
+                all_details.append(r)
 
         # 回归测试
         regression = self.regression.run_tests()
         return {
-            "tasks_completed": len(results),
+            "tasks_completed": len(all_details),
+            "success": all(d.get("merge", {}).get("success", True) for d in all_details),
             "regression": regression,
-            "details": results,
+            "details": all_details,
         }

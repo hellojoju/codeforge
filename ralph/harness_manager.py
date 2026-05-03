@@ -210,6 +210,9 @@ class HarnessManager:
         # 1. 修改范围没有越界
         checks.append("修改范围没有越界")
         for f in files_changed:
+            # .ralph/ 是系统内部路径，自动放行
+            if f.startswith(".ralph/"):
+                continue
             in_scope = any(f.startswith(s) for s in unit.scope_allow)
             in_deny = any(f.startswith(s) or f.endswith(s) for s in unit.scope_deny)
             if in_deny:

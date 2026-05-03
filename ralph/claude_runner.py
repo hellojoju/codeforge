@@ -1,15 +1,9 @@
 """Claude Code Runner — 结构化 Claude CLI 执行器
 
-文档依据：
-- AI 协议 §6.4 harness 不是提示词 — 必须以结构化数据保存
-- PRD §8.1 系统负责长期控制 — Claude Code 只执行带 context_pack 和 task_harness 的短任务
-- 实施方案 §4.14 Claude Code Runner
-
 职责：
-- 从 ContextPack + TaskHarness 构造结构化 prompt
-- 调用 claude -p --permission-mode acceptEdits
-- 解析执行结果，提取结构化 ExecutionResult
-- 执行后收集 git diff 作为结果的一部分
+  - 从 ContextPack + TaskHarness 构造结构化 prompt
+  - 底层调用 ClaudeCodeAdapter（tool_adapter）执行
+  - 执行后收集 git diff + 结构化结果（WorkUnit 级别逻辑）
 """
 
 from __future__ import annotations
@@ -18,19 +12,21 @@ import asyncio
 import json
 import logging
 import subprocess
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ralph.tool_adapter import ClaudeCodeAdapter, ExecOptions, Message, ToolAdapter
+
 logger = logging.getLogger(__name__)
 
 
-# ==================== 结构化执行结果 ====================
+# ==================== 结构化执行结果（向后兼容 WorkUnitEngine）====================
+
 
 @dataclass(frozen=True)
 class ExecutionResult:
-    """Claude Code 执行的结构化结果（对齐 AI 协议 §8.2）"""
+    """Claude Code 执行的结构化结果（对齐 AI 协议 §8.2）。"""
     work_id: str
     success: bool
     stdout: str
@@ -47,6 +43,7 @@ class ExecutionResult:
 
 
 # ==================== Prompt 构建 ====================
+
 
 def build_execution_prompt(
     work_id: str,
@@ -110,7 +107,7 @@ def build_execution_prompt(
 """
 
 
-# ==================== 权限规则提示 ====================
+# ==================== 安全规则提示 ====================
 
 PERMISSION_RULES = """
 ## 安全规则
@@ -125,10 +122,12 @@ PERMISSION_RULES = """
 
 # ==================== Claude Code Runner ====================
 
+
 class ClaudeCodeRunner:
     """Claude Code 结构化执行器。
 
-    封装 Claude CLI 调用，提供结构化输入输出。
+    上层封装，处理 WorkUnit 级别的逻辑（prompt 构造、git diff、结果解析），
+    底层使用 ClaudeCodeAdapter 执行。
     """
 
     def __init__(
@@ -139,7 +138,7 @@ class ClaudeCodeRunner:
     ) -> None:
         self._project_dir = Path(project_dir)
         self._timeout = timeout
-        self._claude_bin = claude_bin
+        self._adapter: ToolAdapter = ClaudeCodeAdapter(claude_bin=claude_bin)
 
     def execute(
         self,
@@ -150,7 +149,7 @@ class ClaudeCodeRunner:
         scope_deny: list[str],
         acceptance_criteria: list[str],
     ) -> ExecutionResult:
-        """同步执行一个 WorkUnit（内部调用 execute_streaming）。"""
+        """同步执行一个 WorkUnit（内部异步运行）。"""
         return asyncio.run(self.execute_streaming(
             work_id=work_id,
             context_pack_text=context_pack_text,
@@ -170,21 +169,9 @@ class ClaudeCodeRunner:
         scope_deny: list[str],
         acceptance_criteria: list[str],
         stream_callback: Callable[[str, str], None] | None = None,
+        cwd: Path | None = None,
     ) -> ExecutionResult:
-        """异步执行一个 WorkUnit，支持流式输出。
-
-        Args:
-            work_id: WorkUnit ID
-            context_pack_text: 上下文包文本
-            harness_text: Harness 约束文本
-            scope_allow: 允许修改的路径列表
-            scope_deny: 禁止修改的路径列表
-            acceptance_criteria: 验收标准列表
-            stream_callback: 可选的流式回调，签名 (event_type, chunk_text)
-
-        Returns:
-            ExecutionResult 结构化执行结果
-        """
+        """异步执行一个 WorkUnit，支持流式输出。"""
         prompt = build_execution_prompt(
             work_id=work_id,
             context_pack_text=context_pack_text,
@@ -195,163 +182,68 @@ class ClaudeCodeRunner:
         )
         prompt += PERMISSION_RULES
 
-        cmd = [
-            self._claude_bin,
-            "-p", prompt,
-            "--permission-mode", "acceptEdits",
-            "--output-format", "stream-json",
-            "--verbose",
-        ]
+        opts = ExecOptions(
+            cwd=str(cwd or self._project_dir),
+            timeout=self._timeout,
+        )
 
         logger.info("Claude 流式执行: %s", work_id)
 
-        stdout_parts: list[str] = []
-        stderr_parts: list[str] = []
+        session = await self._adapter.execute(prompt, opts)
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=self._project_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+        # 消费消息流，触发回调
+        async for msg in session.messages():
+            if stream_callback:
+                stream_callback(msg.type, msg.content)
 
-            # 并发读取 stdout 和 stderr
-            async def _read_stdout() -> None:
-                assert proc.stdout is not None
-                async for raw_line in proc.stdout:
-                    line = raw_line.decode("utf-8", errors="replace")
-                    stdout_parts.append(line)
-                    self._parse_stream_line(line, stream_callback)
+        result = await session.wait_result()
 
-            async def _read_stderr() -> None:
-                assert proc.stderr is not None
-                async for raw_line in proc.stderr:
-                    line = raw_line.decode("utf-8", errors="replace")
-                    stderr_parts.append(line)
-
-            # 并发读取 + 等待进程退出
-            await asyncio.gather(
-                _read_stdout(),
-                _read_stderr(),
-            )
-            return_code = await proc.wait()
-
-        except FileNotFoundError:
-            logger.error("claude CLI 未找到")
+        if result.status != "completed":
+            logger.error("Claude 执行失败: %s", result.error[:500] if result.error else "")
             return ExecutionResult(
                 work_id=work_id,
                 success=False,
-                stdout="",
-                stderr="",
-                error="claude CLI 未找到，请先安装 Claude Code CLI",
-            )
-        except asyncio.TimeoutError:
-            logger.error("任务执行超时(%d秒)", self._timeout)
-            return ExecutionResult(
-                work_id=work_id,
-                success=False,
-                stdout="",
-                stderr="",
-                error=f"执行超时({self._timeout}秒)",
+                stdout=result.output,
+                stderr=result.error or "",
+                error=result.error,
             )
 
-        stdout = "".join(stdout_parts)
-        stderr = "".join(stderr_parts)
+        logger.info("任务执行成功")
 
-        if return_code != 0:
-            error = stderr or stdout
-            logger.error("Claude 执行失败: %s", error[:500])
-            return ExecutionResult(
-                work_id=work_id,
-                success=False,
-                stdout=stdout,
-                stderr=stderr,
-                error=error,
-            )
-
-        logger.info("任务执行成功, 输出 %d 字符", len(stdout))
-
-        # 收集 git diff 结果
         files_created, files_modified, files_deleted = self._collect_git_diff()
-
-        # 尝试读取结构化结果
-        structured_result = self._read_structured_result(work_id)
+        structured = self._read_structured_result(work_id)
 
         return ExecutionResult(
             work_id=work_id,
             success=True,
-            stdout=stdout,
-            stderr=stderr,
+            stdout=result.output,
+            stderr=result.error or "",
             files_created=files_created,
             files_modified=files_modified,
             files_deleted=files_deleted,
-            test_results=structured_result.get("test_results", {}),
-            scope_violations=structured_result.get("scope_violations", []),
-            risks_observed=structured_result.get("risks_observed", ""),
+            test_results=structured.get("test_results", {}),
+            scope_violations=structured.get("scope_violations", []),
+            risks_observed=structured.get("risks_observed", ""),
         )
 
-    def _parse_stream_line(
-        self,
-        line: str,
-        stream_callback: Callable[[str, str], None] | None,
-    ) -> None:
-        """解析 stream-json 输出的一行，提取有用内容并触发回调。"""
-        line = line.strip()
-        if not line:
-            return
-        try:
-            obj = json.loads(line)
-            event_type = obj.get("type", "")
-
-            # 提取 assistant 消息文本
-            if event_type == "assistant":
-                result_text = obj.get("result", "")
-                if result_text and stream_callback:
-                    stream_callback("text", result_text)
-            elif event_type == "result":
-                # 最终结果
-                if stream_callback:
-                    status = obj.get("subtype", "unknown")
-                    stream_callback("result", f"执行完成: {status}")
-        except json.JSONDecodeError:
-            # 非 JSON 行，忽略（可能是调试输出）
-            pass
-
     def _collect_git_diff(self) -> tuple[list[str], list[str], list[str]]:
-        """通过 git diff 收集文件变更。
-
-        Returns:
-            (files_created, files_modified, files_deleted)
-        """
+        """通过 git diff 收集文件变更。"""
         try:
-            # 新增文件（untracked）
             untracked = subprocess.run(
                 ["git", "ls-files", "--others", "--exclude-standard"],
-                cwd=self._project_dir,
-                capture_output=True,
-                text=True,
-                check=True,
+                cwd=self._project_dir, capture_output=True, text=True, check=True,
             )
             files_created = [f for f in untracked.stdout.strip().split("\n") if f]
 
-            # 修改文件
             modified_result = subprocess.run(
                 ["git", "diff", "--name-only", "HEAD"],
-                cwd=self._project_dir,
-                capture_output=True,
-                text=True,
-                check=True,
+                cwd=self._project_dir, capture_output=True, text=True, check=True,
             )
             files_modified = [f for f in modified_result.stdout.strip().split("\n") if f]
 
-            # 删除文件
             deleted_result = subprocess.run(
                 ["git", "diff", "--name-only", "--diff-filter=D", "HEAD"],
-                cwd=self._project_dir,
-                capture_output=True,
-                text=True,
-                check=True,
+                cwd=self._project_dir, capture_output=True, text=True, check=True,
             )
             files_deleted = [f for f in deleted_result.stdout.strip().split("\n") if f]
 

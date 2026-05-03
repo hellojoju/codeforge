@@ -106,6 +106,81 @@ class GitHubIssueSource(IssueSource):
             ))
         return issues
 
+    # ── 写回方法 ─────────────────────────────────────────────
+
+    def write_comment(self, issue_number: int, body: str) -> dict:
+        """向 Issue 添加评论。"""
+        import json
+        import urllib.request
+
+        url = f"https://api.github.com/repos/{self._repo}/issues/{issue_number}/comments"
+        req = urllib.request.Request(url, method="POST")
+        if self._token:
+            req.add_header("Authorization", f"Bearer {self._token}")
+        req.add_header("Accept", "application/vnd.github.v3+json")
+        req.add_header("Content-Type", "application/json")
+        req.data = json.dumps({"body": body}).encode()
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return {"ok": True, "data": json.loads(resp.read().decode())}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def update_labels(self, issue_number: int, labels: list[str]) -> dict:
+        """替换 Issue 的标签（保留已有标签，追加新标签）。"""
+        import json
+        import urllib.request
+
+        url = f"https://api.github.com/repos/{self._repo}/issues/{issue_number}"
+        req = urllib.request.Request(url, method="GET")
+        if self._token:
+            req.add_header("Authorization", f"Bearer {self._token}")
+        req.add_header("Accept", "application/vnd.github.v3+json")
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                current = json.loads(resp.read().decode())
+        except Exception:
+            current = {}
+
+        existing_labels = [l.get("name", "") for l in current.get("labels", [])]
+        # 过滤掉已有的 status: 前缀标签，追加新标签
+        existing_labels = [l for l in existing_labels if not l.startswith("status:")]
+        merged = list(dict.fromkeys(existing_labels + labels))
+
+        put_req = urllib.request.Request(url, method="PATCH")
+        if self._token:
+            put_req.add_header("Authorization", f"Bearer {self._token}")
+        put_req.add_header("Accept", "application/vnd.github.v3+json")
+        put_req.add_header("Content-Type", "application/json")
+        put_req.data = json.dumps({"labels": merged}).encode()
+
+        try:
+            with urllib.request.urlopen(put_req, timeout=15) as resp:
+                return {"ok": True, "data": json.loads(resp.read().decode())}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def close_issue(self, issue_number: int) -> dict:
+        """关闭 Issue。"""
+        import json
+        import urllib.request
+
+        url = f"https://api.github.com/repos/{self._repo}/issues/{issue_number}"
+        req = urllib.request.Request(url, method="PATCH")
+        if self._token:
+            req.add_header("Authorization", f"Bearer {self._token}")
+        req.add_header("Accept", "application/vnd.github.v3+json")
+        req.add_header("Content-Type", "application/json")
+        req.data = json.dumps({"state": "closed"}).encode()
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return {"ok": True, "data": json.loads(resp.read().decode())}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     @staticmethod
     def _classify_by_labels(labels: list[str]) -> str:
         label_lower = " ".join(labels).lower()

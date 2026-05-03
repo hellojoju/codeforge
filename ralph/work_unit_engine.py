@@ -21,9 +21,11 @@ from pathlib import Path
 from typing import Any
 
 from ralph.claude_runner import ClaudeCodeRunner, ExecutionResult
+from ralph.config_manager import RalphConfigManager
 from ralph.context_pack_manager import ContextPackManager
 from ralph.evidence_collector import EvidenceCollector
 from ralph.harness_manager import HarnessManager
+from ralph.memory_manager import MemoryManager
 from ralph.repository import RalphRepository
 from ralph.review_manager import ReviewManager, ReviewRequest
 from ralph.schema.review_result import ReviewResult
@@ -39,7 +41,8 @@ class WorkUnitEngine:
     draft → ready → running → needs_review → accepted/failed/blocked
     """
 
-    def __init__(self, project_dir: Path, event_bus: Any = None) -> None:
+    def __init__(self, project_dir: Path, event_bus: Any = None,
+                 memory_manager: MemoryManager | None = None) -> None:
         self._project_dir = Path(project_dir)
         ralph_dir = self._project_dir / ".ralph"
         self._repository = RalphRepository(ralph_dir)
@@ -48,12 +51,21 @@ class WorkUnitEngine:
         self._evidence_collector = EvidenceCollector(ralph_dir)
         self._review_mgr = ReviewManager()
         self._runner = ClaudeCodeRunner(self._project_dir)
+        self._config_mgr = RalphConfigManager(ralph_dir)
         self._event_bus = event_bus
+        self._memory = memory_manager or MemoryManager(ralph_dir)
 
     def _emit_event(self, event_type: str, **kwargs: Any) -> None:
         """发送 Ralph 事件到 Dashboard（如果有 event_bus）。"""
         if self._event_bus is not None:
             self._event_bus.emit(event_type, **kwargs)
+
+    def _archive_if_terminal(self, work_id: str, exec_log: str = "") -> None:
+        """终态自动归档到记忆系统。"""
+        unit = self._repository.get_work_unit(work_id)
+        if unit and unit.status.value in ("accepted", "failed", "blocked"):
+            from dataclasses import asdict
+            self._memory.on_work_unit_completed(asdict(unit), exec_log)
 
     def create_work_unit(self, unit: WorkUnit) -> WorkUnit:
         """创建并保存 WorkUnit（初始状态 draft）。"""
@@ -97,6 +109,7 @@ class WorkUnitEngine:
         agent: Any = None,
         prd_summary: str = "",
         use_claude_runner: bool = True,
+        tool_cwd: Path | None = None,
     ) -> dict:
         """执行 WorkUnit：ready → running → needs_review/failed/blocked。
 
@@ -105,6 +118,7 @@ class WorkUnitEngine:
             agent: 执行 agent（use_claude_runner=False 时使用旧接口）
             prd_summary: PRD 摘要
             use_claude_runner: 是否使用 Claude Code Runner 执行
+            tool_cwd: 工具执行工作目录（用于 worktree 隔离），默认 project_dir
 
         Returns:
             执行结果 dict
@@ -127,6 +141,7 @@ class WorkUnitEngine:
             unit = self._repository.transition(
                 work_id, WorkUnitStatus.BLOCKED, reason=f"上下文包超出 budget: {e}"
             )
+            self._archive_if_terminal(work_id)
             return {"success": False, "status": "blocked", "error": str(e), "work_id": work_id}
 
         # 执行前门禁
@@ -136,14 +151,25 @@ class WorkUnitEngine:
             unit = self._repository.transition(
                 work_id, WorkUnitStatus.BLOCKED, reason=f"preflight 失败: {preflight.failures}"
             )
+            self._archive_if_terminal(work_id)
             return {"success": False, "status": "blocked", "error": str(preflight.failures), "work_id": work_id}
+
+        # Token budget 检查
+        budget_check = self._config_mgr.check_budget()
+        if not budget_check["allowed"]:
+            logger.error("Token budget 超限: %s", budget_check["reason"])
+            unit = self._repository.transition(
+                work_id, WorkUnitStatus.BLOCKED, reason=f"budget 超限: {budget_check['reason']}"
+            )
+            self._archive_if_terminal(work_id)
+            return {"success": False, "status": "blocked", "error": budget_check["reason"], "work_id": work_id}
 
         # 开始执行中记录
         self._harness_mgr.start_inflight(work_id)
 
         # 调用执行器
         if use_claude_runner:
-            exec_result = await self._execute_with_claude(unit, context_pack, prd_summary)
+            exec_result = await self._execute_with_claude(unit, context_pack, prd_summary, tool_cwd=tool_cwd)
         else:
             exec_result = await self._execute_with_agent(agent, unit, context_pack, prd_summary)
 
@@ -152,6 +178,7 @@ class WorkUnitEngine:
             unit = self._repository.transition(
                 work_id, WorkUnitStatus.FAILED, actor_role="executor", reason=exec_result.error
             )
+            self._archive_if_terminal(work_id, exec_result.stderr or exec_result.stdout or "")
             return {
                 "success": False,
                 "status": "failed",
@@ -191,6 +218,7 @@ class WorkUnitEngine:
             unit = self._repository.transition(
                 work_id, WorkUnitStatus.FAILED, actor_role="executor", reason=f"postflight 失败: {postflight.failures}"
             )
+            self._archive_if_terminal(work_id)
             return {"success": False, "status": "failed", "error": str(postflight.failures), "work_id": work_id}
 
         # running → needs_review
@@ -213,6 +241,7 @@ class WorkUnitEngine:
         unit: WorkUnit,
         context_pack: Any,
         prd_summary: str,
+        tool_cwd: Path | None = None,
     ) -> ExecutionResult:
         """通过 Claude Code Runner 执行（流式模式）。"""
         harness = unit.task_harness
@@ -235,6 +264,7 @@ class WorkUnitEngine:
             scope_deny=scope_deny,
             acceptance_criteria=acceptance_criteria,
             stream_callback=_stream_cb,
+            cwd=tool_cwd,
         )
 
     async def _execute_with_agent(
@@ -316,6 +346,7 @@ class WorkUnitEngine:
             self._repository.transition(
                 work_id, WorkUnitStatus.ACCEPTED, actor_role="scheduler", reason="审查通过"
             )
+            self._archive_if_terminal(work_id)
         elif review.recommended_action == "返工":
             self._repository.transition(
                 work_id, WorkUnitStatus.NEEDS_REWORK, actor_role="scheduler", reason="审查不通过，需返工"
@@ -331,6 +362,7 @@ class WorkUnitEngine:
             self._repository.transition(
                 work_id, WorkUnitStatus.BLOCKED, actor_role="scheduler", reason=f"审查结论: {review.recommended_action}"
             )
+            self._archive_if_terminal(work_id)
 
         return review
 

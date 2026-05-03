@@ -20,8 +20,8 @@ PRD_FILE = DATA_DIR / "prd.md"
 PROMPTS_DIR = PROJECT_ROOT / "prompts"
 
 # Git配置
-GIT_AUTHOR_NAME = "AI Developer"
-GIT_AUTHOR_EMAIL = "ai-dev@localhost"
+GIT_AUTHOR_NAME = "CodeForge AI"
+GIT_AUTHOR_EMAIL = "codeforge@localhost"
 
 # Agent配置
 MAX_RETRY_COUNT = 3

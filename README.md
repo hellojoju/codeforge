@@ -1,13 +1,13 @@
 <div align="center">
 
-# 🏗️ AI Dev Platform · AI 全自动开发平台
+# ⚡ CodeForge · AI 全自动开发平台
 
 **人类当甲方，AI 干所有活**  
 *Humans as clients, AI does all the work*
 
 ---
 
-[![GitHub stars](https://img.shields.io/badge/dynamic/json?logo=github&label=Stars&style=flat-square&color=%23FF6B35&query=%24.stars&url=https%3A%2F%2Fapi.star-history.com%2Fv1%2Fstars%3Fowner%3Djieson%26repo%3Dauto-coding)](https://github.com/jieson/auto-coding/stargazers)
+[![GitHub stars](https://img.shields.io/badge/dynamic/json?logo=github&label=Stars&style=flat-square&color=%23FF6B35&query=%24.stars&url=https%3A%2F%2Fapi.star-history.com%2Fv1%2Fstars%3Fowner%3Djieson%26repo%3Dauto-coding-dashboard)](https://github.com/jieson/auto-coding-dashboard/stargazers)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white&style=flat-square)](https://python.org)
 [![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=next.js&logoColor=white&style=flat-square)](https://nextjs.org)
@@ -23,7 +23,7 @@
 
 > 说人话：**你说需求，AI 写代码、跑测试、修 Bug，你只管点头或摇头。**
 
-AI Dev Platform 是一个端到端的 AI 驱动软件开发平台。你只需要用自然语言描述想要什么，系统就会：
+CodeForge 是一个端到端的 AI 驱动软件开发平台。你只需要用自然语言描述想要什么，系统就会：
 
 1. 🧠 **多轮追问**你的需求，直到理解透彻
 2. 👨‍💻 **派出 AI 工程师团队**（架构师、后端、前端、QA、安全……）并行干活
@@ -31,7 +31,7 @@ AI Dev Platform 是一个端到端的 AI 驱动软件开发平台。你只需要
 4. ✅ **等你审批**，点头才合并
 5. 📊 **实时看板**让你全程围观 AI 干活
 
-不再是你写代码让 AI 补全，而是 **AI 写代码，你当甲方**。
+不再是你写代码让 AI 补全，而是 **AI 写代码，你当甲方**。**CodeForge**——把你的想法锻造成代码。
 
 ---
 
@@ -166,7 +166,7 @@ Agent执行 → 证据收集 → 自动审查 → 等待审批
 
 ## 🧠 Ralph Engine
 
-Ralph 是这个项目的核心编排引擎，名字来源于"Random Autonomous Leader for Programming Help"。它负责：
+Ralph 是 CodeForge 的核心编排引擎，名字来源于"Random Autonomous Leader for Programming Help"。它负责：
 
 ### WorkUnit 状态机
 
@@ -278,7 +278,7 @@ DRAFT ──▶ READY ──▶ RUNNING ──▶ NEEDS_REVIEW ──▶ ACCEPTE
 ## 📦 项目结构
 
 ```
-auto-coding/
+codeforge/
 ├── cli.py                 # CLI 入口 (Typer + Rich)
 ├── agents/                # 9 种 AI 角色实现
 │   ├── base_agent.py      # Agent 基类
@@ -328,7 +328,7 @@ auto-coding/
 
 ## ⭐ Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=jieson/auto-coding&type=Date)](https://star-history.com/#jieson/auto-coding&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=jieson/auto-coding-dashboard&type=Date)](https://star-history.com/#jieson/auto-coding-dashboard&Date)
 
 ---
 

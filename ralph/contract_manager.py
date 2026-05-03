@@ -52,6 +52,33 @@ class ContractManager:
         contract.freeze()
         return self.save(contract)
 
+    def generate_from_coupling(self, coupling_result: dict) -> list[InterfaceContract]:
+        """根据耦合分析结果自动生成接口合同草案。
+
+        遍历模块间的 import 关系，为有依赖的模块对生成建议合同。
+        """
+        contracts: list[InterfaceContract] = []
+        modules = coupling_result.get("modules", [])
+
+        for mod in modules:
+            for edge in mod.get("import_edges", []):
+                if edge["weight"] < 2:
+                    continue  # 弱引用不生成合同
+                cid = f"contract-{edge['src']}-{edge['dst']}"
+                contract = InterfaceContract(
+                    contract_id=cid,
+                    name=f"{edge['src']} → {edge['dst']} 接口合同",
+                    method="FUNCTION",
+                    path=f"modules::{edge['src']} → modules::{edge['dst']}",
+                    providers=[edge["src"]],
+                    consumers=[edge["dst"]],
+                    status="proposed",
+                )
+                self.save(contract)
+                contracts.append(contract)
+
+        return contracts
+
     def validate_consumer(
         self, contract_id: str, consumer_impl: dict,
     ) -> list[str]:

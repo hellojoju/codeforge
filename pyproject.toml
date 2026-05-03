@@ -1,5 +1,5 @@
 [project]
-name = "ai-dev-platform"
+name = "codeforge"
 version = "0.1.0"
 description = "AI全自动开发平台 - 人类当甲方，AI干所有活"
 readme = "README.md"
@@ -28,7 +28,7 @@ dev = [
 ]
 
 [project.scripts]
-ai-dev = "cli:main"
+codeforge = "cli:main"
 
 [build-system]
 requires = ["hatchling"]

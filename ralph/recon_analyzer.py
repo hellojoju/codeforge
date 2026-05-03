@@ -1,4 +1,8 @@
-"""ReconAnalyzer — 深度代码库侦察分析。"""
+"""ReconAnalyzer — 深度代码库侦察分析。
+
+消费 ProjectAnalyzer 的结构化输出，避免重复扫描。
+当无上游数据时（独立运行场景），回退到自行扫描。
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,11 @@ from pathlib import Path
 
 
 class ReconAnalyzer:
-    """深度代码库侦察：技术栈、模块边界、关键文件、Git 摘要。"""
+    """深度代码库侦察：技术栈、模块边界、关键文件、Git 摘要。
+
+    优先接收 ProjectAnalyzer 的 structured 输出作为基础数据，
+    再补充自身扫描的结果（模块检测、文件计数等）。
+    """
 
     COMMON_DIRS = [
         "src", "app", "components", "lib", "ralph", "dashboard", "agents",
@@ -18,7 +26,32 @@ class ReconAnalyzer:
     def __init__(self):
         pass
 
-    def analyze(self, project_path: Path) -> dict:
+    def analyze(self, project_path: Path,
+                project_analysis: dict | None = None) -> dict:
+        """分析项目代码库。
+
+        project_analysis: ProjectAnalyzer.analyze() 返回的 structured 数据。
+                         传入后作为基础数据，减少重复扫描。
+        """
+        if project_analysis:
+            return self._from_project_analysis(project_path, project_analysis)
+        return self._from_scratch(project_path)
+
+    def _from_project_analysis(self, project_path: Path,
+                                project_analysis: dict) -> dict:
+        """基于 ProjectAnalyzer 的结构化输出生成侦察报告。"""
+        return {
+            "project_name": project_analysis.get("project_name", project_path.name),
+            "tech_stack": project_analysis.get("tech_stack", {}),
+            "modules": self._detect_modules(project_path),
+            "key_files": [f["path"] for f in project_analysis.get("key_files", [])],
+            "git_summary": self._git_summary(project_path),
+            "file_count": self._count_files(project_path),
+            "entry_points": project_analysis.get("entry_points", []),
+        }
+
+    def _from_scratch(self, project_path: Path) -> dict:
+        """无上游数据时自行扫描。"""
         return {
             "project_name": project_path.name,
             "tech_stack": self._detect_tech_stack(project_path),
@@ -26,6 +59,7 @@ class ReconAnalyzer:
             "key_files": self._detect_key_files(project_path),
             "git_summary": self._git_summary(project_path),
             "file_count": self._count_files(project_path),
+            "entry_points": [],
         }
 
     def _detect_tech_stack(self, path: Path) -> dict:
