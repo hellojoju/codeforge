@@ -7,7 +7,7 @@
 
 ---
 
-[![GitHub stars](https://img.shields.io/badge/dynamic/json?logo=github&label=Stars&style=flat-square&color=%23FF6B35&query=%24.stars&url=https%3A%2F%2Fapi.star-history.com%2Fv1%2Fstars%3Fowner%3Djieson%26repo%3Dauto-coding-dashboard)](https://github.com/jieson/auto-coding-dashboard/stargazers)
+[![GitHub stars](https://img.shields.io/badge/dynamic/json?logo=github&label=Stars&style=flat-square&color=%23FF6B35&query=%24.stars&url=https%3A%2F%2Fapi.star-history.com%2Fv1%2Fstars%3Fowner%3Dhellojoju%26repo%3Dcodeforge)](https://github.com/hellojoju/codeforge/stargazers)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white&style=flat-square)](https://python.org)
 [![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=next.js&logoColor=white&style=flat-square)](https://nextjs.org)
@@ -328,7 +328,7 @@ codeforge/
 
 ## ⭐ Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=jieson/auto-coding-dashboard&type=Date)](https://star-history.com/#jieson/auto-coding-dashboard&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=hellojoju/codeforge&type=Date)](https://star-history.com/#hellojoju/codeforge&Date)
 
 ---
 
