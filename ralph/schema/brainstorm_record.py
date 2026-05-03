@@ -1,5 +1,3 @@
-"""Brainstorm 需求共创数据结构。"""
-
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -12,14 +10,14 @@ def _now_iso() -> str:
 class ConfirmedFact:
     topic: str           # "目标用户", "核心功能", etc.
     fact: str            # the confirmed statement
-    source_quote: str = ""  # user's original words
+    source_quote: str    # user's original words
     recorded_at: str = field(default_factory=_now_iso)
 
 
 @dataclass
 class OpenAssumption:
     question: str        # the question to resolve
-    context: str = ""    # why this matters
+    context: str         # why this matters
     status: str = "open"  # open | resolved | deferred
     resolved_answer: str = ""
 
@@ -45,16 +43,12 @@ class BrainstormRecord:
 
     def completeness_score(self) -> float:
         """需求完整度评分: 0.0-1.0"""
-        # 兼容 dict 和 ConfirmedFact 对象
-        def _topic(f):
-            return f.topic if hasattr(f, "topic") else f.get("topic", "")
-
         checks = [
             len(self.confirmed_facts) >= 3,
             len(self.open_assumptions) == 0,
             len(self.user_paths) >= 1,
-            any(_topic(f) == "目标用户" for f in self.confirmed_facts),
-            any(_topic(f) == "核心功能" for f in self.confirmed_facts),
-            any(_topic(f) == "验收标准" for f in self.confirmed_facts),
+            any(f.topic == "目标用户" for f in self.confirmed_facts),
+            any(f.topic == "核心功能" for f in self.confirmed_facts),
+            any(f.topic == "验收标准" for f in self.confirmed_facts),
         ]
         return sum(checks) / len(checks)

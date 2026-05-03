@@ -1,24 +1,12 @@
-"""BrainstormManager — 多轮需求共创引擎。
-
-持久化到 .ralph/brainstorm/ 目录，每轮对话产出 BrainstormRecord。
-"""
-
-from __future__ import annotations
-
-import json
 from pathlib import Path
-
+import json
 from ralph.schema.brainstorm_record import (
-    BrainstormRecord,
-    ConfirmedFact,
-    OpenAssumption,
-    UserPath,
-    _now_iso,
+    BrainstormRecord, ConfirmedFact, OpenAssumption, UserPath, _now_iso,
 )
 
 
 class BrainstormManager:
-    """多轮需求共创管理器。"""
+    """多轮需求共创管理器。每轮对话产出 BrainstormRecord，持久化到 .ralph/brainstorm/"""
 
     TOPICS_TO_COVER = [
         "目标用户", "用户角色", "核心功能", "暂不做的功能",
@@ -42,7 +30,7 @@ class BrainstormManager:
 
     def generate_questions(self, record: BrainstormRecord) -> list[str]:
         """分析当前记录，生成下一轮要追问的问题。"""
-        questions: list[str] = []
+        questions = []
         covered = {f.topic for f in record.confirmed_facts}
 
         for topic in self.TOPICS_TO_COVER:
@@ -56,13 +44,10 @@ class BrainstormManager:
 
         return questions[:5]
 
-    def process_response(
-        self,
-        record: BrainstormRecord,
-        user_response: str,
-        extracted_facts: list[dict] | None = None,
-    ) -> BrainstormRecord:
-        """处理用户回复，更新记录。extracted_facts 由 LLM 提取。"""
+    def process_response(self, record: BrainstormRecord,
+                         user_response: str,
+                         extracted_facts: list[dict] | None = None,
+                         ) -> BrainstormRecord:
         record.round_number += 1
         record.user_message = user_response
 
@@ -90,21 +75,16 @@ class BrainstormManager:
         return record
 
     def is_complete(self, record: BrainstormRecord) -> bool:
-        """检查需求共创是否完成。"""
-        return (
-            record.completeness_score() >= 0.8
-            and len(record.open_assumptions) == 0
-        )
+        return (record.completeness_score() >= 0.8
+                and len(record.open_assumptions) == 0)
 
     def get_summary(self, record: BrainstormRecord) -> dict:
-        """生成结构化摘要，供 PRDManager 使用。"""
         return {
             "project_name": record.project_name,
             "total_rounds": record.round_number,
             "completeness": record.completeness_score(),
             "confirmed_facts": [
-                {"topic": f.topic, "fact": f.fact}
-                for f in record.confirmed_facts
+                {"topic": f.topic, "fact": f.fact} for f in record.confirmed_facts
             ],
             "open_assumptions": [
                 {"question": a.question, "status": a.status}
@@ -121,24 +101,11 @@ class BrainstormManager:
         for f in sorted(self._dir.glob("*.json"), reverse=True):
             try:
                 data = json.loads(f.read_text())
-                # 计算完整度时不重建对象，直接用 dict 算
-                facts = data.get("confirmed_facts", [])
-                assumptions = data.get("open_assumptions", [])
-                paths = data.get("user_paths", [])
-                checks = [
-                    len(facts) >= 3,
-                    len(assumptions) == 0,
-                    len(paths) >= 1,
-                    any(isinstance(f, dict) and f.get("topic") == "目标用户" for f in facts),
-                    any(isinstance(f, dict) and f.get("topic") == "核心功能" for f in facts),
-                    any(isinstance(f, dict) and f.get("topic") == "验收标准" for f in facts),
-                ]
-                completeness = sum(checks) / len(checks)
                 records.append({
                     "record_id": data.get("record_id", f.stem),
                     "project_name": data.get("project_name", ""),
                     "round_number": data.get("round_number", 0),
-                    "completeness": completeness,
+                    "completeness": BrainstormRecord(**data).completeness_score(),
                     "created_at": data.get("created_at", ""),
                 })
             except Exception:
@@ -149,33 +116,15 @@ class BrainstormManager:
         path = self._dir / f"{record_id}.json"
         if not path.is_file():
             return None
-        data = json.loads(path.read_text())
-        # 反序列化内嵌对象（跳过非 dict 条目）
-        data["confirmed_facts"] = [
-            ConfirmedFact(**f) for f in data.get("confirmed_facts", []) if isinstance(f, dict)
-        ]
-        data["open_assumptions"] = [
-            OpenAssumption(**a) for a in data.get("open_assumptions", []) if isinstance(a, dict)
-        ]
-        data["user_paths"] = [
-            UserPath(**p) for p in data.get("user_paths", []) if isinstance(p, dict)
-        ]
-        return BrainstormRecord(**data)
+        return BrainstormRecord(**json.loads(path.read_text()))
 
     def _save(self, record: BrainstormRecord) -> None:
+        from dataclasses import asdict
         path = self._dir / f"{record.record_id}.json"
-        data = {}
-        for k, v in record.__dict__.items():
-            if k.startswith("_"):
-                continue
-            if isinstance(v, list):
-                data[k] = [
-                    item.__dict__ if hasattr(item, "__dict__") and not isinstance(item, dict) else item
-                    for item in v
-                ]
-            else:
-                data[k] = v
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+        path.write_text(json.dumps(
+            asdict(record),
+            indent=2, ensure_ascii=False,
+        ))
 
     @staticmethod
     def _question_for_topic(topic: str) -> str:
