@@ -119,10 +119,11 @@ class BrainstormManager:
         return BrainstormRecord(**json.loads(path.read_text()))
 
     def _save(self, record: BrainstormRecord) -> None:
+        from dataclasses import asdict
         path = self._dir / f"{record.record_id}.json"
         path.write_text(json.dumps(
-            {k: v for k, v in record.__dict__.items() if not k.startswith("_")},
-            indent=2, ensure_ascii=False, default=str,
+            asdict(record),
+            indent=2, ensure_ascii=False,
         ))
 
     @staticmethod

@@ -186,9 +186,13 @@ class RalphCommandHandler:
         if blocker_id:
             blocker = self._repository.get_blocker(blocker_id)
             if blocker:
-                blocker.resolved = True
-                blocker.resolution = "approved" if approved else "rejected"
-                self._repository.save_blocker(blocker)
+                from dataclasses import replace
+                updated = replace(
+                    blocker,
+                    resolved=True,
+                    resolution="approved" if approved else "rejected",
+                )
+                self._repository.save_blocker(updated)
 
         if approved:
             # 将 WorkUnit 状态重置为 ready 以继续执行
@@ -296,9 +300,13 @@ class RalphCommandHandler:
         if blocker_id:
             blocker = self._repository.get_blocker(blocker_id)
             if blocker:
-                blocker.resolved = True
-                blocker.resolution = resolution
-                self._repository.save_blocker(blocker)
+                from dataclasses import replace
+                updated = replace(
+                    blocker,
+                    resolved=True,
+                    resolution=resolution,
+                )
+                self._repository.save_blocker(updated)
 
         if resolution == "provide":
             # 解除阻塞，继续执行
