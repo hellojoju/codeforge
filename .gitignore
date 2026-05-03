@@ -1,6 +1,13 @@
-dashboard-ui/
 __pycache__/
 *.pyc
 .pytest_cache/
 .env
 archive/
+.DS_Store
+
+# dashboard-ui (frontend)
+dashboard-ui/node_modules/
+dashboard-ui/.next/
+dashboard-ui/playwright-report/
+dashboard-ui/test-results/
+dashboard-ui/.env.local
