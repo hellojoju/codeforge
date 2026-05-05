@@ -109,14 +109,17 @@ const mockTransition = (): Transition => ({
 });
 
 const mockRunStatus = (): RunStatus => ({
-  total: 10,
-  running: 2,
-  needs_review: 3,
-  blocked: 1,
-  accepted: 4,
-  failed: 0,
-  latest_event: null,
-  next_action: 'Review pending work units',
+  total_work_units: 10,
+  status_counts: {
+    running: 2,
+    needs_review: 3,
+    blocked: 1,
+    accepted: 4,
+    failed: 0,
+  },
+  success_rate_percent: 40,
+  unresolved_blockers: 0,
+  timestamp: '2024-01-01T00:00:00Z',
 });
 
 describe('Ralph API Client', () => {
@@ -386,7 +389,10 @@ describe('Ralph API Client', () => {
       );
       expect(result.total).toBe(10);
       expect(result.running).toBe(2);
-      expect(result.next_action).toBe('Review pending work units');
+      expect(result.needs_review).toBe(3);
+      expect(result.accepted).toBe(4);
+      expect(result.blocked).toBe(1);
+      expect(result.failed).toBe(0);
     });
   });
 

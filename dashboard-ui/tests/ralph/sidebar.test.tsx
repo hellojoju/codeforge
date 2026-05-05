@@ -4,9 +4,12 @@ import { Sidebar } from '@/components/ralph/sidebar';
 import * as storeModule from '@/lib/ralph-store';
 import type { Tab } from '@/lib/ralph-types';
 
+const mockPush = vi.fn();
+
 // Mock next/navigation
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push: mockPush }),
+  usePathname: () => '/ralph',
 }));
 
 // Mock the store
@@ -114,34 +117,22 @@ describe('Sidebar', () => {
     expect(screen.queryByText('概览')).toBeNull();
   });
 
-  it('calls addTab when clicking navigation item', () => {
+  it('navigates to overview route when clicking overview item', () => {
     render(<Sidebar />);
 
     const overviewButton = screen.getByText('概览').closest('button');
     fireEvent.click(overviewButton!);
 
-    expect(mockAddTab).toHaveBeenCalledWith({
-      label: '概览',
-      type: 'overview',
-      work_id: undefined,
-      pinned: false,
-    });
+    expect(mockPush).toHaveBeenCalledWith('/ralph');
   });
 
-  it('calls setActiveTab when clicking existing tab type', () => {
-    const existingTabs: Tab[] = [
-      { id: 'tab-1', label: '概览', type: 'overview', pinned: false, created_at: Date.now() },
-    ];
-    vi.mocked(storeModule.useRalphStore).mockReturnValue(createMockStore(existingTabs));
-
+  it('navigates to approvals route when clicking approvals item', () => {
     render(<Sidebar />);
 
-    const overviewButton = screen.getByText('概览').closest('button');
-    fireEvent.click(overviewButton!);
+    const approvalsButton = screen.getByText('审批中心').closest('button');
+    fireEvent.click(approvalsButton!);
 
-    // Should activate existing tab instead of creating new one
-    expect(mockSetActiveTab).toHaveBeenCalledWith('tab-1');
-    expect(mockAddTab).not.toHaveBeenCalled();
+    expect(mockPush).toHaveBeenCalledWith('/ralph/approvals');
   });
 
   it('renders with correct width classes', () => {

@@ -254,14 +254,11 @@ export interface Tab {
 // === Run Status ===
 
 export interface RunStatus {
-  total: number;
-  running: number;
-  needs_review: number;
-  blocked: number;
-  accepted: number;
-  failed: number;
-  latest_event: RalphEvent | null;
-  next_action: string | null;
+  total_work_units: number;
+  status_counts: Record<string, number>;
+  success_rate_percent: number;
+  unresolved_blockers: number;
+  timestamp: string;
 }
 
 // === API Request/Response Types ===

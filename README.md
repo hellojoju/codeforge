@@ -262,12 +262,10 @@ DRAFT ──▶ READY ──▶ RUNNING ──▶ NEEDS_REVIEW ──▶ ACCEPTE
 ## 🧪 测试
 
 ```
-前端单元测试:  291 passed, 12 failed  (Vitest, 303 total)
+前端单元测试:  375 passed, 0 failed  (Vitest)
 前端 E2E:      6 spec files            (Playwright)
 后端集成测试:  待接入
 ```
-
-> 🚧 前端部分组件测试存在 12 个失败（React 19 渲染上下文相关），后端 Python 测试尚未接入。
 
 ---
 
