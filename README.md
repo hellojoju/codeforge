@@ -232,7 +232,10 @@ DRAFT ──▶ READY ──▶ RUNNING ──▶ NEEDS_REVIEW ──▶ ACCEPTE
 | | `/ralph/contracts` | 接口合同 |
 | **系统** | `/ralph/graph` | 依赖关系 DAG (graphify) |
 | | `/ralph/memory` | 记忆系统状态 |
-| | `/ralph/tastes` | 偏好记忆管理 |
+| | `/ralph/files` | 文件浏览器与编辑器 |
+| | `/ralph/history` | 执行历史记录 |
+| | `/ralph/projects` | 项目管理与分析 |
+| | `/ralph/usage` | API 用量统计 |
 | | `/ralph/settings/*` | 配置中心（Provider、工具链、Issue 策略、Agent） |
 
 ### Dashboard 后端 API
@@ -311,7 +314,7 @@ codeforge/
 │   ├── consumer.py        # 命令消费者
 │   └── state_repository.py# 状态仓库
 ├── dashboard-ui/          # Next.js 前端
-│   ├── app/ralph/         # 23+ 路由页面
+│   ├── app/ralph/         # 25 个路由页面
 │   ├── lib/               # Store + API + WebSocket
 │   └── components/        # UI 组件
 ├── .ralph/                # 项目运行时数据
@@ -321,8 +324,8 @@ codeforge/
 │   ├── knowledge-graph/   # 知识图谱
 │   └── config/            # 配置中心
 ├── tests/                 # 测试
-│   ├── ralph/             # Python 单元测试
-│   ├── *.test.tsx         # 前端组件测试
+│   ├── *.test.ts(x)       # 前端组件测试
+│   ├── ralph/             # Ralph 前端 API 与组件测试
 │   └── e2e/               # Playwright E2E
 └── docs/                  # 架构文档 & 设计决策
 ```
