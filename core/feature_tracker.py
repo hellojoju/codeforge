@@ -7,6 +7,7 @@ Phase 3 重构后，FeatureTracker 退化为 ProjectStateRepository 的薄适配
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import datetime
 from pathlib import Path
@@ -109,6 +110,7 @@ class FeatureTracker:
             existing = self._repository.get_feature(feature_id)
             if existing is None:
                 return
+            existing = copy.deepcopy(existing)
             for key, value in updates.items():
                 setattr(existing, key, value)
             self._repository.upsert_feature(existing, event_type="feature_updated")
@@ -168,6 +170,23 @@ class FeatureTracker:
                 f.error_log.append(reason)
                 self._save()
                 progress.log(f"{feature_id} 被阻塞: {reason}")
+
+    def mark_pending(self, feature_id: str, reason: str = "") -> None:
+        """退回重试：将 feature 状态重置为 pending，追加错误日志。"""
+        if self._repository is not None:
+            f = self.get(feature_id)
+            if f:
+                error_log = list(getattr(f, "error_log", []))
+                if reason:
+                    error_log.append(reason)
+                self._update_feature(feature_id, status="pending", error_log=error_log)
+        else:
+            f = self.get(feature_id)
+            if f:
+                f.status = "pending"
+                if reason:
+                    f.error_log.append(reason)
+                self._save()
 
     def add_error(self, feature_id: str, error: str) -> None:
         if self._repository is not None:

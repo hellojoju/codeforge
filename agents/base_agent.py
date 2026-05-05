@@ -92,6 +92,7 @@ class BaseAgent(ABC):
                 "files_changed": [],
                 "needs_review": False,
                 "error": f"Permission blocked: {violations}",
+                "blocking_type": "permission_blocked",
             }
 
         result = self._run_with_claude(prompt, workspace_dir=workspace_dir)
@@ -110,6 +111,7 @@ class BaseAgent(ABC):
                 "files_changed": files_changed,
                 "needs_review": False,
                 "error": f"Post-execution permission blocked: {violations}",
+                "blocking_type": "permission_blocked",
             }
 
         if result["success"]:
@@ -119,6 +121,7 @@ class BaseAgent(ABC):
                 "message": f"{self.role}任务 {feature_id} 执行完成",
                 "files_changed": files_changed,
                 "needs_review": True,
+                "blocking_type": "",
             }
         else:
             error = result.get("error", "未知错误")
@@ -129,6 +132,7 @@ class BaseAgent(ABC):
                 "files_changed": [],
                 "needs_review": False,
                 "error": error,
+                "blocking_type": "code_error",
             }
 
     def _log(self, message: str) -> None:

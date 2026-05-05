@@ -88,6 +88,7 @@ class FeatureExecutionService:
                 "success": result.get("success", False),
                 "files_changed": files_changed,
                 "error": result.get("error", ""),
+                "blocking_type": result.get("blocking_type", ""),
                 "diff_stat": diff_stat,
                 "work_id": feature.id,
                 "status": "completed" if result.get("success") else "failed",

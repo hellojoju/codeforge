@@ -228,3 +228,46 @@ export const EXECUTION_STATUS_COLORS: Record<ExecutionStatus, string> = {
   completed: 'bg-blue-500',
   error: 'bg-red-500',
 }
+
+// --- Execution Ledger ---
+
+export type LedgerEntryStatus = 'started' | 'completed' | 'failed' | 'retrying' | 'blocked'
+
+export interface ExecutionEntry {
+  feature_id: string
+  status: LedgerEntryStatus
+  agent_id: string
+  started_at: string
+  completed_at: string
+  error: string
+  files_changed: string[]
+  retry_count: number
+  notes: string
+}
+
+export interface ExecutionLedger {
+  executions: ExecutionEntry[]
+  summary: {
+    total_executions: number
+    completed: number
+    failed: number
+    blocked: number
+    retrying: number
+  }
+}
+
+export const LEDGER_STATUS_LABELS: Record<LedgerEntryStatus, string> = {
+  started: '已启动',
+  completed: '已完成',
+  failed: '失败',
+  retrying: '重试中',
+  blocked: '已阻塞',
+}
+
+export const LEDGER_STATUS_COLORS: Record<LedgerEntryStatus, string> = {
+  started: 'bg-blue-500',
+  completed: 'bg-green-500',
+  failed: 'bg-red-500',
+  retrying: 'bg-yellow-500',
+  blocked: 'bg-orange-500',
+}

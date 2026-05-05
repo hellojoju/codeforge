@@ -258,6 +258,17 @@ def create_dashboard_app(
             "total": len(issues),
         }
 
+    @app.post("/api/blocking-issues/{issue_id}/resolve")
+    async def resolve_blocking_issue(issue_id: str, body: dict[str, Any]) -> dict:
+        resolution = (body.get("resolution") or "").strip()
+        if not resolution:
+            raise HTTPException(status_code=422, detail="resolution is required")
+        ok = app.state.repository.resolve_blocking_issue(issue_id, resolution)
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"Blocking issue {issue_id} not found")
+        app.state.event_bus.emit("blocking_issue_resolved", issue_id=issue_id, resolution=resolution)
+        return {"success": True, "issue_id": issue_id}
+
     @app.get("/api/execution-ledger")
     async def get_execution_ledger() -> dict:
         ledger_file = app.state.repository._base.parent / "execution-plan.json"

@@ -1,6 +1,6 @@
 /** REST API 客户端 — 对接 FastAPI Dashboard 后端。 */
 
-import type { Snapshot, DashboardEvent, Command, ModuleAssignment, ExecutionStatus, AgentWithSilence, EventStreamItem, BlockingIssue } from './types'
+import type { Snapshot, DashboardEvent, Command, ModuleAssignment, ExecutionStatus, AgentWithSilence, EventStreamItem, BlockingIssue, ExecutionLedger } from './types'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:18753'
 
@@ -258,4 +258,20 @@ export async function listBlockingIssues(
   if (!res.ok) throw new Error(`Failed to fetch blocking issues: ${res.status}`)
   const data = await res.json()
   return data.issues as BlockingIssue[]
+}
+
+export async function fetchExecutionLedger(): Promise<ExecutionLedger> {
+  const res = await fetch(`${API_BASE}/api/execution-ledger`)
+  if (!res.ok) throw new Error(`Failed to fetch execution ledger: ${res.status}`)
+  return res.json()
+}
+
+export async function resolveBlockingIssue(issueId: string, resolution: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/api/blocking-issues/${encodeURIComponent(issueId)}/resolve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resolution }),
+  })
+  if (!res.ok) throw new Error(`Failed to resolve blocking issue: ${res.status}`)
+  return res.json()
 }

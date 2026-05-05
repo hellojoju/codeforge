@@ -247,12 +247,7 @@ class ProjectManager:
                 else:
                     retry_count = len(feature.error_log)
                     if retry_count < MAX_RETRY_COUNT:
-                        self.feature_tracker.add_error(feature.id, "验收不通过，退回重做")
-                        # 通过 Repository 直接更新状态为 pending（重试）
-                        existing = self.repository.get_feature(feature.id)
-                        if existing:
-                            existing.status = "pending"
-                            self.repository.upsert_feature(existing, event_type="feature_updated")
+                        self.feature_tracker.mark_pending(feature.id, "验收不通过，退回重做")
                         self.execution_ledger.log_execution(
                             feature_id=feature.id,
                             status=ExecutionStatus.RETRYING,
@@ -283,10 +278,7 @@ class ProjectManager:
                         agent_id=instance.instance_id,
                     )
                 else:
-                    existing = self.repository.get_feature(feature.id)
-                    if existing:
-                        existing.status = "pending"
-                        self.repository.upsert_feature(existing, event_type="feature_updated")
+                    self.feature_tracker.mark_pending(feature.id)
                     self.execution_ledger.log_execution(
                         feature_id=feature.id,
                         status=ExecutionStatus.RETRYING,
