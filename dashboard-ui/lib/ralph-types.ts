@@ -301,3 +301,66 @@ export interface Transition {
   to_status: WorkUnitStatus;
   requires_approval: boolean;
 }
+
+// === Retro (反思回顾) ===
+
+export interface Lesson {
+  category: 'went_well' | 'didnt_work' | 'to_improve';
+  content: string;
+  source: 'rule' | 'ai_enhanced';
+  severity: 'low' | 'medium' | 'high';
+}
+
+export interface RetroRecord {
+  retro_id: string;
+  work_id: string;
+  work_status: string;
+  work_type: string;
+  lessons: Lesson[];
+  metrics: Record<string, number>;
+  summary: string;
+  ai_summary?: string;
+  created_at: string;
+  tags: string[];
+}
+
+export interface RetroSummary {
+  period: string;
+  total_retros: number;
+  went_well: number;
+  didnt_work: number;
+  to_improve: number;
+  top_issues: string[];
+}
+
+// === Review Matrix (多维度评审) ===
+
+export interface DimensionResult {
+  dimension: string;
+  display_name: string;
+  conclusion: '通过' | '不通过' | '跳过';
+  confidence: 'high' | 'medium' | 'low';
+  summary: string;
+  findings: Array<{
+    description: string;
+    severity: 'critical' | 'high' | 'medium' | 'low';
+    suggested_action?: string;
+    file_path?: string;
+  }>;
+  method: 'rule' | 'ai_enhanced';
+}
+
+export interface ReviewDimensionConfig {
+  dimension: string;
+  display_name: string;
+  enabled: boolean;
+  method: 'rule' | 'ai' | 'both';
+  prompt_template: string;
+  weight: number;
+  required_for_types: string[];
+}
+
+export interface ReviewResultWithDimensions extends ReviewResult {
+  dimension_results: DimensionResult[];
+  overall_confidence: string;
+}

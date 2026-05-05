@@ -50,6 +50,8 @@ class ContextPackManager:
         interface_contracts: list[str] | None = None,
         upstream_results: list[str] | None = None,
         budget_tokens: int = 8000,
+        graphify_context: str = "",
+        lessons_learned: list[str] | None = None,
     ) -> ContextPack:
         """为 WorkUnit 组装上下文包。
 
@@ -59,6 +61,7 @@ class ContextPackManager:
             interface_contracts: 相关接口合同
             upstream_results: 上游任务结果摘要
             budget_tokens: 上下文 token 预算
+            graphify_context: graphify 代码图谱查询结果（可选）
 
         Returns:
             ContextPack
@@ -77,16 +80,22 @@ class ContextPackManager:
             risks.append(f"假设错误影响: {unit.impact_if_wrong}")
         risks.extend(unit.scope_deny)  # 禁止范围也是约束
 
+        # 如果提供了 graphify 上下文，注入到上游结果
+        enriched_upstream = list(upstream_results or [])
+        if graphify_context:
+            enriched_upstream.append(f"[代码图谱] {graphify_context}")
+
         pack = ContextPack(
             work_id=unit.work_id,
             task_description=f"{unit.title}\n{unit.target}",
             prd_fragment=prd_fragment,
             interface_contracts=interface_contracts or [],
             file_summaries=file_summaries,
-            upstream_results=upstream_results or [],
+            upstream_results=enriched_upstream,
             risks_and_constraints=risks,
             acceptance_criteria=unit.acceptance_criteria,
             scope_deny=unit.scope_deny,
+            lessons_learned=lessons_learned or [],
             trusted_data=["PRD 片段", "接口合同", "上游任务结果"],
             untrusted_data=["执行 agent 自述", "无关历史聊天"],
         )

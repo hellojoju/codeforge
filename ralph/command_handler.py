@@ -9,13 +9,14 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from dashboard.models import Command
+from core.state_models import Command
 from ralph.config_manager import RalphConfigManager
 from ralph.parallel_executor import ParallelOrchestrator
 from ralph.repository import RalphRepository
@@ -47,8 +48,8 @@ class RalphCommandHandler:
 
         logger.info("处理 Ralph 命令: %s, work_id: %s", cmd_type, work_id)
 
-        # 对于 prepare_work_unit，work_id 可以为空
-        if cmd_type != "prepare_work_unit":
+        # 对于 prepare_work_unit 和管理类命令，work_id 可以为空或不校验
+        if cmd_type not in ("prepare_work_unit", "retro", "ship", "register_rule"):
             unit = self._repository.get_work_unit(work_id)
             if unit is None:
                 return {
@@ -71,6 +72,10 @@ class RalphCommandHandler:
                 "prepare_work_unit": self._handle_prepare_work_unit,
                 "execute_work_unit": self._handle_execute_work_unit,
                 "dispatch_parallel": self._handle_dispatch_parallel,
+                "browse": self._handle_browse,
+                "retro": self._handle_retro,
+                "ship": self._handle_ship,
+                "register_rule": self._handle_register_rule,
             }
 
             handler = handler_map.get(cmd_type)
@@ -81,6 +86,10 @@ class RalphCommandHandler:
                     "work_id": work_id,
                     "new_status": None,
                 }
+
+            # execute_work_unit 和 dispatch_parallel 需要 async 支持
+            if cmd_type in ("execute_work_unit", "dispatch_parallel"):
+                return self._run_async(handler, work_id, payload)
             return handler(work_id, payload)
         except Exception as e:
             logger.error("处理 Ralph 命令失败: %s", e)
@@ -91,6 +100,15 @@ class RalphCommandHandler:
                 "work_id": work_id,
                 "new_status": current.status.value if current else None,
             }
+
+    @staticmethod
+    def _run_async(handler, work_id: str, payload: dict) -> dict[str, Any]:
+        """在子线程中运行 async handler，避免死锁。"""
+        def _target():
+            return asyncio.run(handler(work_id, payload))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(_target)
+            return fut.result(timeout=300)
 
     # ------------------------------------------------------------------
     # 审查相关命令
@@ -439,7 +457,7 @@ class RalphCommandHandler:
             "new_status": WorkUnitStatus.DRAFT.value,
         }
 
-    def _handle_execute_work_unit(self, work_id: str, payload: dict) -> dict[str, Any]:
+    async def _handle_execute_work_unit(self, work_id: str, payload: dict) -> dict[str, Any]:
         """执行 WorkUnit：ready → running → 实际执行。"""
         unit = self._repository.get_work_unit(work_id)
 
@@ -468,7 +486,7 @@ class RalphCommandHandler:
 
         # 通过引擎执行：ready → running → needs_review
         try:
-            result = asyncio.run(self._engine.execute(work_id))
+            result = await self._engine.execute(work_id)
             new_unit = self._repository.get_work_unit(work_id)
             logger.info("WorkUnit %s 执行完成: %s", work_id, result)
             return {
@@ -549,7 +567,7 @@ class RalphCommandHandler:
             "new_status": WorkUnitStatus.FAILED.value,
         }
 
-    def _handle_dispatch_parallel(self, work_id: str, payload: dict) -> dict[str, Any]:
+    async def _handle_dispatch_parallel(self, work_id: str, payload: dict) -> dict[str, Any]:
         """并行执行所有 ready 状态的 WorkUnit。"""
         ready_units = self._repository.list_work_units(WorkUnitStatus.READY)
         if not ready_units:
@@ -567,7 +585,7 @@ class RalphCommandHandler:
         )
 
         try:
-            result = asyncio.run(orchestrator.dispatch_work_units(ready_units, prd_summary=prd_summary))
+            result = await orchestrator.dispatch_work_units(ready_units, prd_summary=prd_summary)
             return {
                 "success": result.get("success", False),
                 "message": f"并行执行完成: {result.get('tasks_completed', 0)} 个任务",
@@ -577,3 +595,254 @@ class RalphCommandHandler:
         except Exception as e:
             logger.error("并行执行失败: %s", e)
             return {"success": False, "message": f"并行执行失败: {e}", "work_id": work_id}
+
+    async def _handle_browse(self, work_id: str, payload: dict) -> dict[str, Any]:
+        """通过 PersistentBrowser 执行前端页面浏览/截图/验证。
+
+        payload 支持:
+          - url: 要访问的页面 URL（必需）
+          - action: browse | screenshot | click | fill（默认 browse）
+          - selector: CSS 选择器（click/fill 时必需）
+          - value: 表单填充值（fill 时必需）
+          - baseline_name: 基线截图名称（用于对比）
+          - compare: 是否与基线对比（默认 False）
+        """
+        from ralph.persistent_browser import PersistentBrowser
+
+        url = payload.get("url", "")
+        if not url:
+            return {"success": False, "message": "缺少 url 参数", "work_id": work_id}
+
+        action = payload.get("action", "browse")
+        selector = payload.get("selector", "")
+        value = payload.get("value", "")
+        baseline_name = payload.get("baseline_name", "")
+        compare = payload.get("compare", False)
+
+        user_data_dir = str(self._ralph_dir / "browser-profile")
+        browser = PersistentBrowser(user_data_dir=user_data_dir)
+
+        try:
+            await browser.start()
+            await browser.start_health_monitor(interval_seconds=60, target_url=url)
+            page = await browser.get_page()
+            await page.goto(url, wait_until="networkidle")
+
+            result: dict[str, Any] = {"url": url, "action": action}
+
+            if action == "screenshot" or action == "browse":
+                shot_path = await browser.take_screenshot(
+                    baseline_name or f"work_{work_id}",
+                    page=page,
+                )
+                result["screenshot"] = shot_path
+
+                if compare and baseline_name:
+                    diff = await browser.compare_screenshot(baseline_name, page=page)
+                    result["diff"] = diff.to_dict()
+
+            elif action == "click":
+                if not selector:
+                    return {"success": False, "message": "click 操作需要 selector", "work_id": work_id}
+                await page.click(selector)
+                result["clicked"] = selector
+                shot_path = await browser.take_screenshot(f"click_{work_id}", page=page)
+                result["screenshot"] = shot_path
+
+            elif action == "fill":
+                if not selector or not value:
+                    return {"success": False, "message": "fill 操作需要 selector 和 value", "work_id": work_id}
+                await page.fill(selector, value)
+                result["filled"] = {"selector": selector, "value": value}
+                shot_path = await browser.take_screenshot(f"fill_{work_id}", page=page)
+                result["screenshot"] = shot_path
+
+            elif action == "save_baseline":
+                if not baseline_name:
+                    return {"success": False, "message": "save_baseline 需要 baseline_name", "work_id": work_id}
+                path = await browser.save_baseline(baseline_name, page=page)
+                result["baseline"] = path
+
+            else:
+                return {"success": False, "message": f"不支持的操作: {action}", "work_id": work_id}
+
+            return {"success": True, "message": f"浏览完成: {action} @ {url}", "work_id": work_id, "result": result}
+
+        except Exception as e:
+            logger.error("浏览操作失败: %s", e)
+            return {"success": False, "message": f"浏览操作失败: {e}", "work_id": work_id}
+        finally:
+            await browser.close()
+
+    # ------------------------------------------------------------------
+    # 反思回顾命令
+    # ------------------------------------------------------------------
+
+    def _handle_retro(self, work_id: str, payload: dict) -> dict[str, Any]:
+        """反思回顾管理：list / summary / detail。
+
+        payload 支持:
+          - action: list | summary | detail（默认 list）
+          - limit: 返回数量限制（默认 10）
+          - period: 汇总周期 week | month（默认 week）
+          - work_id: 查看某条 retro（detail 模式）
+        """
+        from ralph.memory_manager import MemoryManager
+
+        action = payload.get("action", "list")
+
+        try:
+            mgr = MemoryManager(self._ralph_dir)
+        except Exception as e:
+            return {"success": False, "message": f"MemoryManager 初始化失败: {e}", "work_id": work_id}
+
+        if action == "list":
+            limit = payload.get("limit", 10)
+            retros = mgr.get_recent_retros(limit=limit)
+            return {
+                "success": True,
+                "message": f"最近 {len(retros)} 条 retro 记录",
+                "work_id": work_id,
+                "data": retros,
+            }
+
+        if action == "summary":
+            period = payload.get("period", "week")
+            summary = mgr.get_retro_summary(period=period)
+            return {
+                "success": True,
+                "message": f"{period} retro 汇总",
+                "work_id": work_id,
+                "data": summary,
+            }
+
+        if action == "detail":
+            detail_work_id = payload.get("work_id", work_id)
+            retro = self._repository.get_retro(detail_work_id)
+            if retro is None:
+                return {
+                    "success": False,
+                    "message": f"未找到 {detail_work_id} 的 retro 记录",
+                    "work_id": work_id,
+                }
+            return {
+                "success": True,
+                "message": f"{detail_work_id} retro 详情",
+                "work_id": work_id,
+                "data": self._repository._serialize_retro(retro),
+            }
+
+        return {
+            "success": False,
+            "message": f"未知的 retro 操作: {action}",
+            "work_id": work_id,
+        }
+
+    # ------------------------------------------------------------------
+    # 发布命令
+    # ------------------------------------------------------------------
+
+    def _handle_ship(self, work_id: str, payload: dict) -> dict[str, Any]:
+        """发布 WorkUnit：创建发布分支、打 tag、生成 changelog。
+
+        payload 支持:
+          - strategy: patch | minor | major（默认 patch）
+          - tag_prefix: tag 前缀（默认 v）
+        """
+        from ralph.ship_service import ShipService
+
+        strategy = payload.get("strategy", "patch")
+        tag_prefix = payload.get("tag_prefix", "v")
+
+        project_dir = self._ralph_dir.parent
+        svc = ShipService(self._ralph_dir, project_dir)
+
+        # 支持预验证模式
+        dry_run = payload.get("dry_run", False)
+        if dry_run:
+            blockers = svc.verify_pre_ship(work_id)
+            if blockers:
+                return {
+                    "success": False,
+                    "message": "发布前验证未通过",
+                    "work_id": work_id,
+                    "blockers": blockers,
+                }
+            return {
+                "success": True,
+                "message": "发布前验证通过",
+                "work_id": work_id,
+            }
+
+        result = svc.ship_work_unit(
+            work_id,
+            strategy=strategy,
+            tag_prefix=tag_prefix,
+            push_remote=payload.get("push_remote", False),
+            create_pr_flag=payload.get("create_pr", False),
+            pr_base=payload.get("pr_base", "main"),
+        )
+
+        return {
+            "success": result.success,
+            "message": result.message,
+            "work_id": work_id,
+            "tag": result.tag,
+            "branch": result.branch,
+            "changelog_path": result.changelog_path,
+            "pr_url": result.pr_url,
+            "pushed": result.pushed,
+        }
+
+    # ------------------------------------------------------------------
+    # 规则注册命令
+    # ------------------------------------------------------------------
+
+    def _handle_register_rule(self, work_id: str, payload: dict) -> dict[str, Any]:
+        """注册自定义规则到规则引擎。
+
+        payload 支持:
+          - rule_id: 规则唯一标识
+          - dimension: 所属评审维度
+          - rule_name: 规则名称
+          - action: register | list | count
+          - list_dimension: 列出指定维度的规则（list/count 模式）
+        """
+        from ralph.rules_engine import RulesEngine, register_builtin_rules
+
+        action = payload.get("action", "list")
+        engine = RulesEngine()
+        register_builtin_rules(engine)
+
+        if action == "register":
+            return {
+                "success": False,
+                "message": "规则注册需要通过 Python API 完成，不支持命令行动态注册",
+                "work_id": work_id,
+            }
+
+        if action == "list":
+            dimension = payload.get("list_dimension")
+            rules = engine.list_rules(dimension)
+            return {
+                "success": True,
+                "message": f"已注册 {len(rules)} 条规则" + (f" [{dimension}]" if dimension else ""),
+                "work_id": work_id,
+                "rules": [{"id": r.id, "dimension": r.dimension, "name": r.name} for r in rules],
+            }
+
+        if action == "count":
+            dimension = payload.get("list_dimension")
+            count = engine.rule_count(dimension)
+            return {
+                "success": True,
+                "message": f"已注册 {count} 条规则" + (f" [{dimension}]" if dimension else ""),
+                "work_id": work_id,
+                "count": count,
+            }
+
+        return {
+            "success": False,
+            "message": f"未知的 register_rule 操作: {action}",
+            "work_id": work_id,
+        }

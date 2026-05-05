@@ -40,6 +40,7 @@ class ContextPack:
     risks_and_constraints: list[str] = field(default_factory=list)  # 已知风险和约束
     acceptance_criteria: list[str] = field(default_factory=list)  # 验收标准
     scope_deny: list[str] = field(default_factory=list)  # 禁止修改范围
+    lessons_learned: list[str] = field(default_factory=list)  # 历史经验教训
     trusted_data: list[str] = field(default_factory=list)  # 受信数据来源
     untrusted_data: list[str] = field(default_factory=list)  # 非受信数据来源
 
@@ -52,5 +53,6 @@ class ContextPack:
         total += sum(len(r) for r in self.risks_and_constraints)
         total += sum(len(c) for c in self.acceptance_criteria)
         total += sum(len(s) for s in self.scope_deny)
+        total += sum(len(l) for l in self.lessons_learned)
         # 粗略：1 token ≈ 4 字符（中英混合）
         return total // 4

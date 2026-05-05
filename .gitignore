@@ -5,6 +5,13 @@ __pycache__/
 archive/
 .DS_Store
 
+# Ralph runtime data (per-project, should not be committed)
+.ralph/
+
+# Legacy state files (migration target)
+data/tasks.db
+data/execution-plan.json
+
 # dashboard-ui (frontend)
 dashboard-ui/node_modules/
 dashboard-ui/.next/

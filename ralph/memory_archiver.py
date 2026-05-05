@@ -116,11 +116,11 @@ class MemoryArchiver:
         results: list[dict] = []
 
         for entry in self._read_short_term():
-            if query_lower in json.dumps(entry).lower():
+            if query_lower in json.dumps(entry, ensure_ascii=False).lower():
                 results.append({"source": "short_term", "entry": entry, "score": 1.0})
 
         for entry in self._read_medium_term():
-            if query_lower in json.dumps(entry).lower():
+            if query_lower in json.dumps(entry, ensure_ascii=False).lower():
                 results.append({"source": "medium_term", "entry": entry, "score": 0.8})
 
         return sorted(results, key=lambda r: r["score"], reverse=True)[:top_k]

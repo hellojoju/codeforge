@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from dashboard.models import Command, Event
+from core.state_models import Command, Event
 
 
 class InvalidTransitionError(ValueError):

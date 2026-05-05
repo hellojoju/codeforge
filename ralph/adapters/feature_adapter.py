@@ -14,20 +14,22 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from core.state_models import FeatureStatus
 from ralph.schema.task_harness import TaskHarness
 from ralph.schema.work_unit import WorkUnit, WorkUnitStatus
 
 if TYPE_CHECKING:
-    from core.feature_tracker import Feature
+    from core.state_models import Feature
 
 
-# Feature.status → WorkUnitStatus 映射
-_FEATURE_STATUS_MAP: dict[str, WorkUnitStatus] = {
-    "pending": WorkUnitStatus.DRAFT,
-    "in_progress": WorkUnitStatus.RUNNING,
-    "review": WorkUnitStatus.NEEDS_REVIEW,
-    "done": WorkUnitStatus.ACCEPTED,
-    "blocked": WorkUnitStatus.BLOCKED,
+# FeatureStatus → WorkUnitStatus 映射
+_FEATURE_STATUS_MAP: dict[FeatureStatus, WorkUnitStatus] = {
+    FeatureStatus.PENDING: WorkUnitStatus.DRAFT,
+    FeatureStatus.IN_PROGRESS: WorkUnitStatus.RUNNING,
+    FeatureStatus.REVIEW: WorkUnitStatus.NEEDS_REVIEW,
+    FeatureStatus.DONE: WorkUnitStatus.ACCEPTED,
+    FeatureStatus.BLOCKED: WorkUnitStatus.BLOCKED,
+    FeatureStatus.FAILED: WorkUnitStatus.FAILED,
 }
 
 # WorkUnitStatus → Feature.status 反向映射
@@ -70,7 +72,7 @@ def feature_to_work_unit(feature: Feature) -> WorkUnit:
     scope_deny = [".env", ".env.*", "credentials", "*.pem", "*.key"]
 
     # 状态映射
-    status = _FEATURE_STATUS_MAP.get(feature.status, WorkUnitStatus.DRAFT)
+    status = _FEATURE_STATUS_MAP.get(FeatureStatus(feature.status), WorkUnitStatus.DRAFT)
 
     # 构造 TaskHarness（最小化，后续由 HarnessManager 补全）
     harness = TaskHarness(

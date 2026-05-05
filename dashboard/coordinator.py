@@ -12,7 +12,8 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from core.blocking_tracker import BlockingIssueType, BlockingTracker
+from core.blocking_tracker import BlockingTracker
+from core.state_models import BlockingType
 from core.config import MAX_RETRY_COUNT
 from core.execution_ledger import ExecutionStatus
 from dashboard.agent_process_manager import AgentProcessManager
@@ -182,7 +183,7 @@ class PMCoordinator:
             self._pm._mark_feature_blocked(
                 feature,
                 reason=f"未知角色: {feature.assigned_to}",
-                issue_type=BlockingIssueType.CODE_ERROR,
+                issue_type=BlockingType.CODE_ERROR,
                 detected_by="coordinator",
                 context={"assigned_to": feature.assigned_to},
             )
@@ -268,7 +269,7 @@ class PMCoordinator:
                             self._pm._mark_feature_blocked(
                                 feature,
                                 reason=f"验收不通过，已重试{MAX_RETRY_COUNT}次",
-                                issue_type=BlockingIssueType.CODE_ERROR,
+                                issue_type=BlockingType.CODE_ERROR,
                                 detected_by="verification",
                                 context={"stage": "verification"},
                                 agent_id=instance.instance_id,
@@ -335,7 +336,7 @@ class PMCoordinator:
     def _request_approval(self, instance: AgentInstance, feature: Feature) -> None:
         """写入 waiting_approval 状态，通知前端。"""
         # 同步 Agent 状态到 Repository
-        from dashboard.models import AgentInstance as DashboardAgent
+        from core.state_models import AgentInstance as DashboardAgent
 
         dashboard_agent = DashboardAgent(
             id=instance.instance_id,
@@ -391,7 +392,7 @@ class PMCoordinator:
         """将当前 pool 和 feature 状态同步到 Repository。"""
         pool_status = self._pm.pool.get_status()
         for agent_dict in pool_status.get("agents", []):
-            from dashboard.models import AgentInstance as DashboardAgent
+            from core.state_models import AgentInstance as DashboardAgent
 
             dashboard_agent = DashboardAgent(
                 id=agent_dict["instance_id"],

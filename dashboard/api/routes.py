@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from dashboard.api.feature_routes import router as feature_router
+
 if TYPE_CHECKING:
     from agents.product_manager import ProductManager
     from dashboard.coordinator import PMCoordinator
@@ -27,8 +29,9 @@ from fastapi.responses import PlainTextResponse
 from dashboard.command_processor import CommandProcessor
 from dashboard.consumer import CommandConsumer
 from dashboard.event_bus import EventBus
-from dashboard.models import ChatMessage, Command, Event, ModuleAssignment
+from core.state_models import ChatMessage, Command, Event, ModuleAssignment
 from dashboard.state_repository import ProjectStateRepository
+from ralph.command_handler import RalphCommandHandler
 from ralph.config_manager import RalphConfigManager
 from ralph.report_generator import ReportGenerator
 from ralph.repository import RalphRepository
@@ -139,7 +142,8 @@ def create_dashboard_app(
 
     # 注入 RalphRepository
     if ralph_repository is None:
-        ralph_dir = Path(os.environ.get("RALPH_DIR", ".ralph"))
+        from core.ralph_paths import resolve_ralph_dir
+        ralph_dir = resolve_ralph_dir(project_dir) if project_dir else Path(os.environ.get("RALPH_DIR", ".ralph"))
         ralph_repository = RalphRepository(ralph_dir)
     app.state.ralph_repository = ralph_repository
 
@@ -188,10 +192,16 @@ def create_dashboard_app(
     app.state.command_processor = processor
 
     # 注入 CommandConsumer
+    ralph_handler = RalphCommandHandler(
+        ralph_repository._ralph_dir,
+        engine=getattr(app.state, "ralph_engine", None),
+    )
     app.state.consumer = CommandConsumer(
         repository=repository,
         processor=processor,
         event_bus=event_bus,
+        ralph_handler=ralph_handler,
+        ralph_engine=getattr(app.state, "ralph_engine", None),
     )
 
     # 注入 PMCoordinator（可选）
@@ -270,17 +280,11 @@ def create_dashboard_app(
         return {"success": True, "issue_id": issue_id}
 
     @app.get("/api/execution-ledger")
-    async def get_execution_ledger() -> dict:
-        ledger_file = app.state.repository._base.parent / "execution-plan.json"
-        if not ledger_file.exists():
-            return {
-                "executions": [],
-                "summary": {
-                    "total_executions": 0, "completed": 0,
-                    "failed": 0, "blocked": 0, "retrying": 0,
-                },
-            }
-        return json.loads(ledger_file.read_text(encoding="utf-8"))
+    async def get_execution_ledger(feature_id: str | None = None) -> dict:
+        return {
+            "executions": app.state.repository.get_execution_history(feature_id=feature_id),
+            "summary": app.state.repository.get_execution_summary(),
+        }
 
     # --- REST: 用户对话 ---
 
@@ -754,12 +758,91 @@ def create_dashboard_app(
         reviews = ralph_repo.list_reviews(work_id=work_id)
         return [ralph_repo._serialize_review(r) for r in reviews]
 
+    # ── Taste Memory ───────────────────────────────────────────
+
+    @app.get("/api/ralph/tastes")
+    async def ralph_list_tastes() -> dict:
+        """获取所有设计偏好记忆。"""
+        from ralph.taste_memory import TasteMemory
+        ralph_dir: Path = app.state.ralph_repository._ralph_dir
+        tm = TasteMemory(storage_dir=str(ralph_dir))
+        return {"tastes": tm.get_all()}
+
+    @app.delete("/api/ralph/tastes/{taste_id}")
+    async def ralph_delete_taste(taste_id: str) -> dict:
+        """删除一条设计偏好记忆。"""
+        from ralph.taste_memory import TasteMemory
+        ralph_dir: Path = app.state.ralph_repository._ralph_dir
+        tm = TasteMemory(storage_dir=str(ralph_dir))
+        deleted = tm.delete(taste_id)
+        return {"success": deleted, "taste_id": taste_id}
+
+    @app.post("/api/ralph/tastes")
+    async def ralph_create_taste(body: dict) -> dict:
+        """手动创建一条 taste 偏好。"""
+        from ralph.memory_manager import MemoryManager
+        ralph_dir: Path = app.state.ralph_repository._ralph_dir
+        mgr = MemoryManager(ralph_dir)
+        taste_id = body.get("id", f"taste-{_now_iso().replace(':', '-').replace('.', '-')}")
+        result = mgr.record_taste(
+            taste_id=taste_id,
+            preference_type=body.get("preference_type", "neutral"),
+            category=body.get("category", "overall"),
+            description=body.get("description", ""),
+            source="manual",
+            confidence=body.get("confidence", 1.0),
+            metadata=body.get("metadata"),
+        )
+        mgr.close()
+        if result is None:
+            raise HTTPException(status_code=500, detail="TasteMemory 未初始化")
+        return result
+
+    # ── Prompt Injection Guard ─────────────────────────────────
+
+    @app.get("/api/ralph/security/guard-status")
+    async def ralph_guard_status() -> dict:
+        """获取 Prompt Injection 防护状态。"""
+        engine = app.state.work_unit_engine
+        return engine._injection_guard.get_status()
+
+    @app.post("/api/ralph/security/scan")
+    async def ralph_scan_prompt(payload: dict) -> dict:
+        """手动扫描文本的注入风险（调试用）。"""
+        engine = app.state.work_unit_engine
+        text = payload.get("text", "")
+        severity = payload.get("severity_threshold", "中")
+        cleaned, violations = engine._injection_guard.scan_input(text, severity)
+        return {
+            "cleaned": cleaned,
+            "violations": [v.to_dict() for v in violations],
+        }
+
     @app.get("/api/ralph/blockers")
     async def ralph_list_blockers(work_id: str | None = None, resolved: bool | None = None) -> list[dict]:
         """获取所有阻塞项，支持过滤。"""
         ralph_repo: RalphRepository = app.state.ralph_repository
         blockers = ralph_repo.list_blockers(work_id=work_id, resolved=resolved)
         return [_serialize_blocker(b) for b in blockers]
+
+    @app.get("/api/ralph/state-snapshot")
+    async def ralph_state_snapshot() -> dict:
+        """统一状态快照（RalphRepository 新状态模型）。"""
+        ralph_repo: RalphRepository = app.state.ralph_repository
+        return ralph_repo.snapshot()
+
+    @app.get("/api/ralph/blocking-issues")
+    async def ralph_list_blocking_issues(status: str | None = None) -> dict:
+        """列出统一阻塞项。"""
+        ralph_repo: RalphRepository = app.state.ralph_repository
+        issues = ralph_repo.list_blocking_issues(status=status)
+        return {"issues": [i.to_dict() for i in issues], "total": len(issues)}
+
+    @app.get("/api/ralph/execution-ledger")
+    async def ralph_get_execution_ledger() -> dict:
+        """执行账本。"""
+        ralph_repo: RalphRepository = app.state.ralph_repository
+        return ralph_repo.snapshot()
 
     @app.get("/api/ralph/pending-actions")
     async def ralph_pending_actions() -> list[dict]:
@@ -835,6 +918,42 @@ def create_dashboard_app(
             raise HTTPException(status_code=404, detail=f"WorkUnit {work_id} not found")
         transitions = ralph_repo.get_transitions(work_id=work_id)
         return transitions
+
+    @app.get("/api/ralph/work-units/{work_id}/checkpoints")
+    async def ralph_list_checkpoints(work_id: str) -> list[dict]:
+        """获取 WorkUnit 的 checkpoint 列表。"""
+        ralph_repo: RalphRepository = app.state.ralph_repository
+        unit = ralph_repo.get_work_unit(work_id)
+        if unit is None:
+            raise HTTPException(status_code=404, detail=f"WorkUnit {work_id} not found")
+
+        checkpoint_dir = ralph_repo._ralph_dir / "checkpoints"
+        if not checkpoint_dir.is_dir():
+            return []
+
+        checkpoints: list[dict] = []
+        for path in sorted(checkpoint_dir.glob(f"{work_id}.turn-*.json")):
+            try:
+                checkpoints.append(json.loads(path.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                continue
+        return checkpoints
+
+    @app.post("/api/ralph/work-units/{work_id}/checkpoints/{turn}/restore")
+    async def ralph_restore_checkpoint(work_id: str, turn: int) -> dict:
+        """从指定 checkpoint 恢复工作状态。"""
+        ralph_repo: RalphRepository = app.state.ralph_repository
+        unit = ralph_repo.get_work_unit(work_id)
+        if unit is None:
+            raise HTTPException(status_code=404, detail=f"WorkUnit {work_id} not found")
+
+        try:
+            from ralph.turn_engine import TurnBasedExecutionEngine
+            project_dir = Path(os.environ.get("PROJECT_DIR", "."))
+            engine = TurnBasedExecutionEngine(project_dir)
+            return engine.restore_from_checkpoint(work_id, turn)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"恢复失败: {e}")
 
     @app.get("/api/ralph/summary")
     async def ralph_summary() -> dict:
@@ -1095,7 +1214,7 @@ def create_dashboard_app(
         """并行执行所有 ready 的 WorkUnit。"""
         from ralph.command_handler import RalphCommandHandler
         from ralph.work_unit_engine import WorkUnitEngine
-        from dashboard.models import Command
+        from core.state_models import Command
 
         cfg: RalphConfigManager = app.state.config_manager
         ralph_dir = cfg._dir.parent
@@ -1217,27 +1336,71 @@ def create_dashboard_app(
 
     @app.post("/api/ralph/projects/init")
     async def ralph_init_project(body: dict[str, Any]) -> dict:
-        """初始化新项目。"""
+        """初始化新项目。
+
+        创建标准项目骨架：
+        - 源码目录 (src/)
+        - 测试目录 (tests/)
+        - 文档目录 (docs/)
+        - 数据目录 (data/)
+        - .gitignore（含 .ralph/ 排除规则）
+        - CLAUDE.md（项目指令模板）
+        - .ralph/ 外部数据目录（通过 resolve_ralph_dir）
+        - git init
+        """
         path_str = body.get("path", "")
         name = body.get("name", "")
+        tech_stack = body.get("tech_stack", "")  # 可选：python / nodejs / fullstack
         if not path_str:
             raise HTTPException(status_code=422, detail="path is required")
 
         project_path = Path(path_str).resolve()
         project_path.mkdir(parents=True, exist_ok=True)
 
-        # 创建 .ralph/ 目录结构
-        ralph_dir = project_path / ".ralph"
-        for sub in ["config", "work_units", "evidence", "reviews", "blockers", "state", "memory", "reports"]:
+        # 1. 创建标准目录结构
+        dirs_to_create = ["src", "tests", "docs", "data"]
+        for d in dirs_to_create:
+            (project_path / d).mkdir(exist_ok=True)
+
+        # 根据技术栈创建额外目录
+        if tech_stack in ("python", "fullstack"):
+            (project_path / "src" / "__init__.py").touch()
+            (project_path / "tests" / "__init__.py").touch()
+            if not (project_path / "pyproject.toml").exists():
+                _write_pyproject(project_path, name or project_path.name)
+        if tech_stack in ("nodejs", "fullstack"):
+            if not (project_path / "package.json").exists():
+                _write_package_json(project_path, name or project_path.name)
+
+        # 2. 创建 .gitignore（如果不存在）
+        gitignore_path = project_path / ".gitignore"
+        if not gitignore_path.exists():
+            _write_gitignore(gitignore_path)
+
+        # 3. 创建 CLAUDE.md 模板（如果不存在）
+        claude_md_path = project_path / "CLAUDE.md"
+        if not claude_md_path.exists():
+            _write_claude_md(claude_md_path, name or project_path.name)
+
+        # 4. 初始化外部 .ralph/ 数据目录
+        from core.ralph_paths import resolve_ralph_dir
+        ralph_dir = resolve_ralph_dir(project_path)
+        for sub in ["config", "work_units", "evidence", "reviews", "blockers", "state", "memory", "reports", "retros"]:
             (ralph_dir / sub).mkdir(parents=True, exist_ok=True)
 
-        # 初始化 git
+        # 5. 初始化 git
         import subprocess
         try:
             subprocess.run(["git", "init", "-b", "main"], cwd=project_path, capture_output=True, timeout=10)
+            subprocess.run(["git", "config", "user.name", "CodeForge"], cwd=project_path, capture_output=True, timeout=5)
+            subprocess.run(["git", "config", "user.email", "codeforge@local"], cwd=project_path, capture_output=True, timeout=5)
+            # 首次提交骨架
+            subprocess.run(["git", "add", "-A"], cwd=project_path, capture_output=True, timeout=5)
+            subprocess.run(["git", "commit", "-m", "chore: initial project scaffold"], cwd=project_path, capture_output=True, timeout=10)
         except Exception:
-            pass  # git 可能不可用
+            pass  # git 可能不可用或已初始化
 
+        # 6. 注册到最近项目
         cfg: RalphConfigManager = app.state.config_manager
         cfg.add_recent_project(str(project_path), name or project_path.name)
 
@@ -1245,7 +1408,124 @@ def create_dashboard_app(
             "success": True,
             "name": name or project_path.name,
             "path": str(project_path),
+            "ralph_dir": str(ralph_dir),
+            "dirs_created": dirs_to_create,
         }
+
+
+def _write_pyproject(project_path: Path, name: str) -> None:
+    """创建 pyproject.toml 模板。"""
+    content = f'''[project]
+name = "{name}"
+version = "0.1.0"
+description = ""
+requires-python = ">=3.12"
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "ruff"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+'''
+    (project_path / "pyproject.toml").write_text(content, encoding="utf-8")
+
+
+def _write_package_json(project_path: Path, name: str) -> None:
+    """创建 package.json 模板。"""
+    import json
+    data = {
+        "name": name,
+        "version": "0.1.0",
+        "private": True,
+        "scripts": {
+            "dev": "next dev",
+            "build": "next build",
+            "start": "next start",
+            "lint": "next lint",
+            "test": "jest",
+        },
+    }
+    (project_path / "package.json").write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
+def _write_gitignore(path: Path) -> None:
+    """创建 .gitignore。"""
+    content = """# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Node
+node_modules/
+.next/
+.nuxt/
+.output/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Ralph runtime data (managed externally at ~/.ralph/)
+.ralph/
+
+# State files
+data/tasks.db
+data/execution-plan.json
+
+# Test results
+coverage/
+.coverage
+test-results/
+playwright-report/
+"""
+    path.write_text(content, encoding="utf-8")
+
+
+def _write_claude_md(path: Path, name: str) -> None:
+    """创建 CLAUDE.md 项目指令模板。"""
+    content = f"""# {name}
+
+## 项目简介
+<!-- 在此填写项目定位 -->
+
+## 技术栈
+<!-- 编程语言、框架、数据库 -->
+
+## 编码规范
+- 遵循 PEP 8 / ESLint 规范
+- 所有函数必须有类型注解
+- 测试覆盖率 >= 80%
+
+## 工作流程
+- 修改前先读相关文件，理解现有代码
+- 修改后运行测试确保不破坏已有功能
+- 不修改和当前任务无关的代码
+- 有疑问时优先查文档
+"""
+    path.write_text(content, encoding="utf-8")
 
     # --- Ralph API: 项目管理端点 ---
 
@@ -1841,7 +2121,7 @@ def create_dashboard_app(
         from ralph.work_unit_engine import WorkUnitEngine
         engine = WorkUnitEngine(project_dir)
         agent = PMAgent(project_dir, engine=engine)
-        results = agent.schedule_once()
+        results = await agent.schedule_once()
         return {
             "success": True,
             "actions": len(results),
@@ -1944,6 +2224,68 @@ def create_dashboard_app(
         from ralph.retrieval_pipeline import RetrievalPipeline
         pipeline = RetrievalPipeline(ralph_dir)
         return pipeline.search(q, top_k)
+
+    @app.post("/api/ralph/projects/pipeline")
+    async def ralph_run_pipeline(body: dict[str, Any] | None = None) -> dict:
+        """运行完整分析管道：Retrieval → Think → Plan → Recon → Coupling → Contracts → Tasks。
+
+        这是 Ralph 的核心流水线入口，将三层检索、历史教训注入、自动调参
+        全部串联，形成完整的飞轮效应。
+        """
+        body = body or {}
+        project_path_str = body.get("path", os.environ.get("PROJECT_DIR", "."))
+        project_path = Path(project_path_str).resolve()
+        prd_text = body.get("prd_text", "")
+
+        if not project_path.is_dir():
+            raise HTTPException(status_code=404, detail=f"Directory not found: {project_path_str}")
+        if not prd_text:
+            raise HTTPException(status_code=422, detail="prd_text is required for pipeline")
+
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+
+        # 初始化依赖服务
+        from ralph.project_analyzer import ProjectAnalyzer
+        from ralph.recon_analyzer import ReconAnalyzer
+        from ralph.coupling_analyzer import CouplingAnalyzer
+        from ralph.contract_manager import ContractManager
+        from ralph.task_decomposer import TaskDecomposer
+        from ralph.pipeline import AnalysisPipeline
+        from ralph.knowledge_graph import KnowledgeGraphService
+        from ralph.graphify_service import GraphifyService
+
+        project_analysis = _analyze_project(project_path)
+
+        recon = ReconAnalyzer(ralph_dir)
+        coupling = CouplingAnalyzer(ralph_dir)
+        contracts = ContractManager(ralph_dir)
+        decomposer = TaskDecomposer(ralph_dir)
+        kg = KnowledgeGraphService(ralph_dir)
+        graphify = GraphifyService(ralph_dir)
+
+        pipeline = AnalysisPipeline(ralph_dir)
+        ctx = pipeline.run(
+            project_path=project_path,
+            project_analysis=project_analysis,
+            recon_analyzer=recon,
+            coupling_analyzer=coupling,
+            contract_manager=contracts,
+            task_decomposer=decomposer,
+            prd_text=prd_text,
+            knowledge_graph=kg,
+            graphify_service=graphify,
+        )
+
+        return {
+            "success": True,
+            "think": ctx.think_result,
+            "plan": ctx.plan_result,
+            "retrieval": ctx.retrieval_context,
+            "modules": ctx.modules,
+            "high_risk_modules": ctx.high_risk_modules,
+            "suggested_contracts": ctx.suggested_contracts,
+        }
 
     # --- Ralph API: Phase 4 端点 ---
 
@@ -2160,7 +2502,7 @@ def create_dashboard_app(
         if action == "created" and comment_data:
             cmd = comment_to_command(comment_data, str(issue_number))
             if cmd:
-                from dashboard.models import Command as CmdModel
+                from core.state_models import Command as CmdModel
                 command = CmdModel(
                     command_id=f"issue_cmd_{_now_iso()}",
                     type=cmd["type"],
@@ -2253,6 +2595,140 @@ def create_dashboard_app(
         ralph_dir = cfg._dir.parent
         protocol = IssueSyncProtocol(ralph_dir)
         return protocol.get_sync_state()
+
+    # ── Retro API ─────────────────────────────────────────────
+
+    @app.get("/api/ralph/retros")
+    async def ralph_list_retros(limit: int = 50, work_id: str | None = None) -> list[dict]:
+        """列出反思回顾记录。"""
+        repo: RalphRepository = app.state.ralph_repository
+        retros = repo.list_retros(work_id=work_id, limit=limit)
+        return [repo._serialize_retro(r) for r in retros]
+
+    @app.get("/api/ralph/retros/summary")
+    async def ralph_retro_summary(period: str = "week") -> dict:
+        """获取周/月 retro 汇总统计。"""
+        from ralph.memory_manager import MemoryManager
+        repo: RalphRepository = app.state.ralph_repository
+        mgr = MemoryManager(repo._ralph_dir)
+        return mgr.get_retro_summary(period=period)
+
+    @app.get("/api/ralph/retros/{work_id}")
+    async def ralph_get_retro(work_id: str) -> dict:
+        """获取指定 WorkUnit 的反思回顾。"""
+        repo: RalphRepository = app.state.ralph_repository
+        retro = repo.get_retro(f"retro-{work_id}")
+        if retro is None:
+            raise HTTPException(status_code=404, detail=f"Retro for {work_id} not found")
+        return repo._serialize_retro(retro)
+
+    # ── Review Matrix API ─────────────────────────────────────
+
+    @app.get("/api/ralph/work-units/{work_id}/review-matrix")
+    async def ralph_get_review_matrix(work_id: str) -> dict:
+        """获取多维度评审详情。"""
+        repo: RalphRepository = app.state.ralph_repository
+        reviews = repo.list_reviews(work_id=work_id)
+        # 找最新的含 dimension_results 的评审
+        for review in reversed(reviews):
+            if review.dimension_results:
+                return repo._serialize_review(review)
+        if reviews:
+            return repo._serialize_review(reviews[-1])
+        raise HTTPException(status_code=404, detail=f"No reviews for {work_id}")
+
+    @app.get("/api/ralph/review-matrix/config")
+    async def ralph_get_review_config() -> list[dict]:
+        """获取评审矩阵配置。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.get_review_matrix_config()
+
+    @app.post("/api/ralph/review-matrix/config")
+    async def ralph_save_review_config(body: list[dict]) -> list[dict]:
+        """保存评审矩阵配置。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.save_review_matrix_config(body)
+
+    # ── Ship API ──────────────────────────────────────────────
+
+    @app.post("/api/ralph/ship/{work_id}")
+    async def ralph_ship_work_unit(work_id: str, body: dict | None = None) -> dict:
+        """发布 WorkUnit：验证 → 创建发布分支 → 打 tag → 生成 changelog。
+
+        body 支持:
+          - strategy: patch | minor | major
+          - dry_run: 仅验证不发布
+        """
+        repo: RalphRepository = app.state.ralph_repository
+        from ralph.ship_service import ShipService
+
+        project_dir = repo._ralph_dir.parent
+        svc = ShipService(repo._ralph_dir, project_dir)
+
+        body = body or {}
+        dry_run = body.get("dry_run", False)
+        if dry_run:
+            blockers = svc.verify_pre_ship(work_id)
+            return {"success": not blockers, "blockers": blockers}
+
+        strategy = body.get("strategy", "patch")
+        result = svc.ship_work_unit(work_id, strategy=strategy)
+
+        if not result.success:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=400, detail=result.message)
+
+        return {
+            "success": True,
+            "tag": result.tag,
+            "branch": result.branch,
+            "changelog_path": result.changelog_path,
+            "message": result.message,
+        }
+
+    @app.get("/api/ralph/releases")
+    async def ralph_list_releases() -> list[dict]:
+        """获取 Release 历史。"""
+        from ralph.ship_service import ShipService
+        ralph_dir: Path = app.state.ralph_repository._ralph_dir
+        project_dir = ralph_dir.parent
+        svc = ShipService(ralph_dir, project_dir)
+
+        releases_dir = ralph_dir / "releases"
+        if not releases_dir.is_dir():
+            return []
+
+        releases = []
+        for path in sorted(releases_dir.glob("*.md"), reverse=True):
+            content = path.read_text(encoding="utf-8")
+            releases.append({
+                "name": path.stem,
+                "changelog": content[:500],
+                "created_at": _now_iso(),  # 从文件名或 git tag 获取会更精确
+            })
+        return releases
+
+    # 注册 StartupRecover（启动后扫描 RUNNING → INTERRUPTED）
+    from ralph.recovery import StartupRecover
+    startup_recover = StartupRecover(app.state.ralph_repository._ralph_dir)
+    startup_recover.run(app.state.ralph_repository)
+    app.state.startup_recover = startup_recover
+
+    @app.get("/api/recovery-report")
+    async def get_recovery_report():
+        """获取最近的恢复报告."""
+        report = app.state.startup_recover.get_report()
+        if report:
+            return {"success": True, "report": {
+                "interrupted_count": report.interrupted_count,
+                "work_unit_ids": report.work_unit_ids,
+                "titles": report.titles,
+                "created_at": report.created_at,
+            }}
+        return {"success": True, "report": None}
+
+    # 注册 Feature API 路由
+    app.include_router(feature_router)
 
     return app
 def _analyze_project(project_path: Path) -> dict:
@@ -2372,7 +2848,7 @@ def _serialize_evidence(evidence: Any) -> dict:
         "work_id": evidence.work_id,
         "file_name": file_name,
         "file_type": file_type,
-        "size_bytes": 0,  # 暂时无法获取，设为 0
+        "size_bytes": Path(file_path).stat().st_size if file_path and Path(file_path).exists() else 0,
         "created_at": evidence.created_at,
     }
 
@@ -2427,7 +2903,7 @@ def _redact_sensitive_content(content: str) -> str:
 
 def _create_command(cmd_type: str, body: dict[str, Any]) -> Command:
     """从请求体创建 Command 对象，支持幂等键。"""
-    from dashboard.models import Command
+    from core.state_models import Command
     return Command(
         command_id=f"cmd_{_now_iso()}",
         type=cmd_type,

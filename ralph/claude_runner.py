@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from core.ralph_paths import resolve_ralph_dir
 from ralph.tool_adapter import ClaudeCodeAdapter, ExecOptions, Message, ToolAdapter
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,42 @@ class ExecutionResult:
 # ==================== Prompt 构建 ====================
 
 
+def _detect_project_structure(project_dir: Path) -> str:
+    """自动探测项目目录结构，生成代码位置指引。"""
+    parts = ["## 项目目录结构"]
+
+    has_src = (project_dir / "src").is_dir()
+    has_app = (project_dir / "app").is_dir()
+    has_components = (project_dir / "components").is_dir()
+    has_tests = (project_dir / "tests").is_dir()
+    has_pyproject = (project_dir / "pyproject.toml").is_file()
+    has_package = (project_dir / "package.json").is_file()
+
+    if has_src:
+        parts.append("- `src/` — 源码目录，所有业务代码请放入此处")
+    elif has_app or has_components:
+        parts.append("- `app/` / `components/` — Next.js 风格目录，页面和组件请放入对应目录")
+    else:
+        parts.append("- 请在项目根目录或合理的源码子目录下创建文件")
+
+    if has_tests:
+        parts.append("- `tests/` — 测试目录，所有测试文件放入此处")
+
+    if has_pyproject:
+        parts.append("- Python 项目（pyproject.toml）")
+    if has_package:
+        parts.append("- Node.js 项目（package.json）")
+
+    parts.append("")
+    parts.append("### 代码位置规则")
+    parts.append("- 新模块请放入 `src/` 或对应的源码子目录，不要直接放在项目根目录")
+    parts.append("- 测试文件请放入 `tests/`，与源码目录结构对应")
+    parts.append("- 文档请放入 `docs/`")
+    parts.append("")
+
+    return "\n".join(parts)
+
+
 def build_execution_prompt(
     work_id: str,
     context_pack_text: str,
@@ -52,22 +89,29 @@ def build_execution_prompt(
     scope_allow: list[str],
     scope_deny: list[str],
     acceptance_criteria: list[str],
+    project_dir: Path | None = None,
 ) -> str:
     """从 ContextPack + TaskHarness 构造执行 prompt。
 
     结构：
-    1. 任务目标
-    2. 上下文包（最小必要信息）
-    3. 任务 Harness 约束（允许/禁止的范围、工具、门禁）
-    4. 验收标准
-    5. 输出格式要求（结构化 JSON）
+    1. 项目目录结构 + 代码位置规则
+    2. 任务目标
+    3. 上下文包（最小必要信息）
+    4. 任务 Harness 约束（允许/禁止的范围、工具、门禁）
+    5. 验收标准
+    6. 输出格式要求（结构化 JSON）
     """
     scope_allow_text = "\n".join(f"- {p}" for p in scope_allow) if scope_allow else "无限制"
     scope_deny_text = "\n".join(f"- {p}" for p in scope_deny) if scope_deny else "无限制"
     criteria_text = "\n".join(f"- {c}" for c in acceptance_criteria) if acceptance_criteria else "无"
 
+    structure_text = ""
+    if project_dir:
+        structure_text = _detect_project_structure(Path(project_dir))
+
     return f"""# WorkUnit: {work_id}
 
+{structure_text}
 ## 任务目标
 
 {context_pack_text}
@@ -92,7 +136,8 @@ def build_execution_prompt(
 
 1. 只修改允许范围内的文件
 2. 不要修改禁止范围内的任何内容
-3. 执行完成后，在修改的文件中写入一个 JSON 格式的总结，格式如下：
+3. **新代码请放入 `src/` 或对应的源码子目录，不要直接放在项目根目录**
+4. 执行完成后，在修改的文件中写入一个 JSON 格式的总结，格式如下：
 ```json
 {{
   "files_created": ["新建的文件路径"],
@@ -103,7 +148,7 @@ def build_execution_prompt(
   "risks_observed": "观察到的任何风险或注意事项"
 }}
 ```
-4. 将这个 JSON 总结写入 `.ralph/execution_results/{work_id}.json`
+5. 将这个 JSON 总结写入 `.ralph/execution_results/{work_id}.json`
 """
 
 
@@ -179,6 +224,7 @@ class ClaudeCodeRunner:
             scope_allow=scope_allow,
             scope_deny=scope_deny,
             acceptance_criteria=acceptance_criteria,
+            project_dir=self._project_dir,
         )
         prompt += PERMISSION_RULES
 
@@ -253,7 +299,7 @@ class ClaudeCodeRunner:
 
     def _read_structured_result(self, work_id: str) -> dict[str, Any]:
         """读取 Claude 写入的结构化执行结果。"""
-        result_path = self._project_dir / ".ralph" / "execution_results" / f"{work_id}.json"
+        result_path = resolve_ralph_dir(self._project_dir) / "execution_results" / f"{work_id}.json"
         if result_path.exists():
             try:
                 content = result_path.read_text(encoding="utf-8")

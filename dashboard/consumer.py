@@ -8,7 +8,8 @@ from typing import Any
 
 from dashboard.command_processor import CommandProcessor
 from dashboard.event_bus import EventBus
-from dashboard.models import Command
+from core.ralph_paths import resolve_ralph_dir
+from core.state_models import Command
 from dashboard.state_repository import ProjectStateRepository
 from ralph.command_handler import RalphCommandHandler
 
@@ -107,7 +108,7 @@ class CommandConsumer:
             # 从项目目录推断 ralph 目录
             project_dir = getattr(self._repo, "_base", None)
             if project_dir:
-                ralph_dir = Path(project_dir) / ".ralph"
+                ralph_dir = resolve_ralph_dir(Path(project_dir))
                 self._ralph_handler = RalphCommandHandler(ralph_dir, engine=self._ralph_engine)
             else:
                 logger.error("无法确定 Ralph 目录，无法处理 Ralph 命令: %s", cmd_type)

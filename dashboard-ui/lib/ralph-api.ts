@@ -19,6 +19,12 @@ import type {
   CreateCommandRequest,
   CreateCommandResponse,
   Transition,
+  Lesson,
+  RetroRecord,
+  RetroSummary,
+  ReviewDimensionConfig,
+  ReviewResultWithDimensions,
+  DimensionResult,
 } from './ralph-types';
 import { normalizeCommand } from './ralph-types';
 
@@ -219,7 +225,25 @@ export async function getTransitions(workId: string): Promise<Transition[]> {
  * @returns Promise<RunStatus>
  */
 export async function getSummary(): Promise<RunStatus> {
-  return request<RunStatus>('/summary');
+  const raw = await request<{
+    total_work_units: number;
+    status_counts: Record<string, number>;
+    success_rate_percent: number;
+    unresolved_blockers: number;
+    timestamp: string;
+  }>('/summary');
+
+  const sc = raw.status_counts;
+  return {
+    total: raw.total_work_units,
+    running: sc['running'] ?? 0,
+    needs_review: sc['needs_review'] ?? 0,
+    blocked: sc['blocked'] ?? 0,
+    accepted: sc['accepted'] ?? 0,
+    failed: sc['failed'] ?? 0,
+    latest_event: null,
+    next_action: null,
+  };
 }
 
 // ============================================================================
@@ -667,11 +691,14 @@ export interface AgentDefinition {
   role: string;
   display_name: string;
   agent_class: string;
+  prompt_file?: string;
   system_prompt_override: string;
   allowed_tools: string[];
   workspace_subdir: string;
   max_instances: number;
   enabled: boolean;
+  prompt_content?: string;
+  execution_requirements?: string;
 }
 
 export async function listAgentDefinitions(): Promise<AgentDefinition[]> {
@@ -751,6 +778,67 @@ export async function searchMemory(q: string): Promise<Record<string, unknown>[]
 }
 
 // ============================================================================
+// Retro (反思回顾)
+// ============================================================================
+
+/**
+ * 列出反思回顾记录
+ */
+export async function listRetros(limit = 50, workId?: string): Promise<RetroRecord[]> {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  if (workId) params.set('work_id', workId);
+  return request<RetroRecord[]>(`/retros?${params.toString()}`);
+}
+
+/**
+ * 获取指定 WorkUnit 的反思回顾
+ */
+export async function getRetro(workId: string): Promise<RetroRecord> {
+  return request<RetroRecord>(`/retros/${encodeURIComponent(workId)}`);
+}
+
+/**
+ * 获取周/月 retro 汇总统计
+ */
+export async function getRetroSummary(period: 'week' | 'month' = 'week'): Promise<RetroSummary> {
+  return request<RetroSummary>(`/retros/summary?period=${period}`);
+}
+
+// ============================================================================
+// Review Matrix (多维度评审)
+// ============================================================================
+
+/**
+ * 获取多维度评审详情
+ */
+export async function getReviewMatrix(workId: string): Promise<ReviewResultWithDimensions> {
+  return request<ReviewResultWithDimensions>(
+    `/work-units/${encodeURIComponent(workId)}/review-matrix`,
+  );
+}
+
+/**
+ * 获取评审矩阵配置
+ */
+export async function getReviewConfig(): Promise<ReviewDimensionConfig[]> {
+  return request<ReviewDimensionConfig[]>('/review-matrix/config');
+}
+
+/**
+ * 保存评审矩阵配置
+ */
+export async function saveReviewConfig(
+  config: ReviewDimensionConfig[],
+): Promise<ReviewDimensionConfig[]> {
+  return request<ReviewDimensionConfig[]>('/review-matrix/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+}
+
+// ============================================================================
 // 类型导出
 // ============================================================================
 
@@ -769,4 +857,10 @@ export type {
   CreateCommandRequest,
   CreateCommandResponse,
   Transition,
+  Lesson,
+  RetroRecord,
+  RetroSummary,
+  DimensionResult,
+  ReviewDimensionConfig,
+  ReviewResultWithDimensions,
 };

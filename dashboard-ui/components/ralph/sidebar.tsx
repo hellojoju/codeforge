@@ -1,24 +1,19 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import {
-  LayoutDashboard, ListTodo, ShieldCheck, Terminal, Radio,
-  FileText, Settings, GitBranch, Brain, FolderOpen, FolderTree,
-  Play, Activity, MessageCircle, Lock, Clock, ChevronLeft, ChevronRight, ChevronDown,
+  ChevronLeft, ChevronRight, ChevronDown,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useRalphStore } from '@/lib/ralph-store';
-import type { Tab } from '@/lib/ralph-types';
 
 const SIDEBAR_COLLAPSED_KEY = 'ralph-sidebar-collapsed';
 
 interface NavItem {
   id: string;
   label: string;
-  icon: React.ReactNode;
-  type: Tab['type'];
-  workId?: string;
+  icon: string;
   route: string;
   badge?: number;
 }
@@ -26,52 +21,54 @@ interface NavItem {
 interface NavSection {
   id: string;
   label: string;
+  icon: string;
   items: NavItem[];
+  defaultCollapsed?: boolean;
 }
 
-const NAV_SECTIONS: NavSection[] = [
+type NavEntry = NavSection | { id: string; label: string; icon: string; route: string };
+
+function isSection(entry: NavEntry): entry is NavSection {
+  return 'items' in entry;
+}
+
+const NAV_ENTRIES: NavEntry[] = [
+  { id: 'home', label: '概览', icon: '🏠', route: '/ralph' },
   {
-    id: 'project',
-    label: '项目',
+    id: 'requirements',
+    label: '需求',
+    icon: '📋',
     items: [
-      { id: 'projects', label: '项目管理', icon: <FolderOpen size={18} />, type: 'projects' as Tab['type'], route: '/ralph/projects' },
-      { id: 'overview', label: '概览', icon: <LayoutDashboard size={18} />, type: 'overview', route: '/ralph' },
-      { id: 'brainstorm', label: '需求共创', icon: <MessageCircle size={18} />, type: 'brainstorm' as Tab['type'], route: '/ralph/brainstorm' },
-      { id: 'prd', label: 'PRD 文档', icon: <FileText size={18} />, type: 'prd' as Tab['type'], route: '/ralph/prd' },
-      { id: 'specs', label: '规格文档', icon: <FileText size={18} />, type: 'specs' as Tab['type'], route: '/ralph/specs' },
-      { id: 'contracts', label: '接口合同', icon: <Lock size={18} />, type: 'contracts' as Tab['type'], route: '/ralph/contracts' },
-      { id: 'files', label: '文件浏览', icon: <FolderTree size={18} />, type: 'files' as Tab['type'], route: '/ralph/files' },
+      { id: 'brainstorm', label: '需求共创', icon: '💬', route: '/ralph/brainstorm' },
+      { id: 'prd', label: 'PRD 文档', icon: '📄', route: '/ralph/prd' },
+      { id: 'specs', label: '规格文档', icon: '📝', route: '/ralph/specs' },
+      { id: 'contracts', label: '接口定义', icon: '🔗', route: '/ralph/contracts' },
     ],
   },
+  { id: 'features', label: '功能看板', icon: '📊', route: '/ralph/features' },
+  { id: 'execution', label: '执行', icon: '⚡', route: '/ralph/execution' },
   {
-    id: 'execution',
-    label: '执行',
+    id: 'quality',
+    label: '质量',
+    icon: '✅',
     items: [
-      { id: 'pipeline', label: '执行管道', icon: <Play size={18} />, type: 'pipeline' as Tab['type'], route: '/ralph/pipeline' },
-      { id: 'work-units', label: '工作单元', icon: <ListTodo size={18} />, type: 'work_unit_list', route: '/ralph/work-units' },
-      { id: 'scheduling', label: '调度面板', icon: <Activity size={18} />, type: 'scheduling' as Tab['type'], route: '/ralph/scheduling' },
+      { id: 'approvals', label: '审批中心', icon: '🛡️', route: '/ralph/approvals' },
+      { id: 'retro', label: '经验回顾', icon: '🔍', route: '/ralph/retro' },
+      { id: 'releases', label: '发布记录', icon: '📦', route: '/ralph/releases' },
+      { id: 'reports', label: '研发报告', icon: '📊', route: '/ralph/reports' },
     ],
   },
+  { id: 'settings', label: '设置', icon: '⚙️', route: '/ralph/settings' },
   {
-    id: 'workbench',
-    label: '工作台',
+    id: 'advanced',
+    label: '高级',
+    icon: '🔧',
+    defaultCollapsed: true,
     items: [
-      { id: 'commands', label: '命令中心', icon: <Terminal size={18} />, type: 'commands', route: '/ralph/commands' },
-      { id: 'events', label: '事件日志', icon: <Radio size={18} />, type: 'events', route: '/ralph/events' },
-      { id: 'approvals', label: '审批中心', icon: <ShieldCheck size={18} />, type: 'approvals', route: '/ralph/approvals' },
-      { id: 'reports', label: '研发报告', icon: <FileText size={18} />, type: 'reports', route: '/ralph/reports' },
-    ],
-  },
-  {
-    id: 'system',
-    label: '系统',
-    items: [
-      { id: 'graph', label: '依赖关系', icon: <GitBranch size={18} />, type: 'graph' as Tab['type'], route: '/ralph/graph' },
-      { id: 'memory', label: '记忆系统', icon: <Brain size={18} />, type: 'memory' as Tab['type'], route: '/ralph/memory' },
-      { id: 'usage', label: 'API 用量', icon: <Activity size={18} />, type: 'usage' as Tab['type'], route: '/ralph/usage' },
-      { id: 'history', label: '历史项目', icon: <Clock size={18} />, type: 'history' as Tab['type'], route: '/ralph/history' },
-      { id: 'providers', label: 'Provider 监控', icon: <Radio size={18} />, type: 'providers_health' as Tab['type'], route: '/ralph/providers' },
-      { id: 'settings', label: '配置中心', icon: <Settings size={18} />, type: 'settings', route: '/ralph/settings' },
+      { id: 'graph', label: '依赖图谱', icon: '🔀', route: '/ralph/graph' },
+      { id: 'memory', label: '记忆系统', icon: '🧠', route: '/ralph/memory' },
+      { id: 'usage', label: 'API 用量', icon: '📈', route: '/ralph/usage' },
+      { id: 'events', label: '事件日志', icon: '📡', route: '/ralph/events' },
     ],
   },
 ];
@@ -82,9 +79,10 @@ interface SidebarProps {
 
 export function Sidebar({ className }: SidebarProps) {
   const router = useRouter();
+  const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
-  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
-  const { setActiveTab, tabs, pendingActions } = useRalphStore();
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set(['advanced']));
+  const { pendingActions } = useRalphStore();
 
   useEffect(() => {
     const stored = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
@@ -95,12 +93,21 @@ export function Sidebar({ className }: SidebarProps) {
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(collapsed));
   }, [collapsed]);
 
-  const handleNavClick = (item: NavItem) => {
-    const existingTab = tabs.find((t) => t.type === item.type && t.work_id === item.workId);
-    if (existingTab) {
-      setActiveTab(existingTab.id);
-    }
-    router.push(item.route);
+  const isActiveRoute = (route: string) => {
+    if (route === '/ralph') return pathname === '/ralph';
+    if (route === '/ralph/execution') return pathname === '/ralph/pipeline' || pathname.startsWith('/ralph/work-units') || pathname === '/ralph/scheduling';
+    if (route === '/ralph/features') return pathname.startsWith('/ralph/features');
+    if (route.startsWith('/ralph/settings')) return pathname.startsWith('/ralph/settings');
+    if (route === '/ralph/approvals') return pathname === '/ralph/approvals';
+    if (route === '/ralph/retro') return pathname === '/ralph/retro';
+    if (route === '/ralph/releases') return pathname === '/ralph/releases';
+    if (route === '/ralph/reports') return pathname === '/ralph/reports';
+    if (route === '/ralph/graph') return pathname === '/ralph/graph';
+    if (route === '/ralph/memory') return pathname === '/ralph/memory';
+    if (route === '/ralph/usage') return pathname === '/ralph/usage';
+    if (route === '/ralph/events') return pathname === '/ralph/events';
+    if (route === '/ralph/requirements') return pathname === '/ralph/requirements';
+    return pathname === route;
   };
 
   const toggleSection = (sectionId: string) => {
@@ -118,7 +125,7 @@ export function Sidebar({ className }: SidebarProps) {
       collapsed ? 'w-16' : 'w-60', className,
     )}>
       {/* Header */}
-      <div className="flex h-14 items-center gap-2 border-b border-slate-200/70 px-3">
+      <div className="flex h-12 items-center gap-2 border-b border-slate-200/70 px-3">
         {!collapsed && (
           <>
             <div className="flex h-6 w-6 items-center justify-center rounded bg-blue-600 flex-shrink-0">
@@ -138,57 +145,96 @@ export function Sidebar({ className }: SidebarProps) {
 
       {/* Navigation */}
       <nav className="flex-1 overflow-auto py-2">
-        {NAV_SECTIONS.map((section) => {
-          const isSectionCollapsed = collapsedSections.has(section.id);
+        {NAV_ENTRIES.map((entry) => {
+          if (isSection(entry)) {
+            const isSectionCollapsed = collapsedSections.has(entry.id);
+            const active = entry.items.some((item) => isActiveRoute(item.route));
+
+            return (
+              <div key={entry.id} className="mb-1">
+                {!collapsed && (
+                  <button
+                    onClick={() => toggleSection(entry.id)}
+                    className={cn(
+                      'flex w-full items-center gap-1.5 px-3 py-1.5 text-xs font-semibold tracking-wider',
+                      active ? 'text-blue-700' : 'text-slate-400 hover:text-slate-600',
+                    )}
+                  >
+                    <span className="text-sm">{entry.icon}</span>
+                    <span className="flex-1 text-left">{entry.label}</span>
+                    {entry.defaultCollapsed && (
+                      <ChevronDown size={10} className={cn('transition-transform', !isSectionCollapsed && 'rotate-180')} />
+                    )}
+                  </button>
+                )}
+
+                {collapsed && (
+                  <div className="px-2 py-1 text-center text-xs text-slate-400">{entry.icon}</div>
+                )}
+
+                {(!isSectionCollapsed) && (
+                  <ul className={cn('space-y-0.5', collapsed ? 'px-2' : 'px-2')}>
+                    {entry.items.map((item) => {
+                      const isActive = isActiveRoute(item.route);
+                      const isApproval = item.id === 'approvals';
+                      const hasPending = isApproval && pendingActions.length > 0;
+
+                      return (
+                        <li key={item.id}>
+                          <button
+                            onClick={() => router.push(item.route)}
+                            className={cn(
+                              'flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors duration-150',
+                              isActive
+                                ? 'bg-blue-50 text-blue-700 font-medium'
+                                : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900',
+                            )}
+                            title={collapsed ? item.label : undefined}
+                          >
+                            <span className="flex-shrink-0 text-sm">{item.icon}</span>
+                            {!collapsed && (
+                              <span className="flex flex-1 items-center justify-between truncate">
+                                <span>{item.label}</span>
+                                {hasPending && (
+                                  <span className="ml-2 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1.5 text-[10px] font-bold text-white">
+                                    {pendingActions.length}
+                                  </span>
+                                )}
+                              </span>
+                            )}
+                            {collapsed && hasPending && (
+                              <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[9px] font-bold text-white">
+                                {pendingActions.length > 9 ? '9+' : pendingActions.length}
+                              </span>
+                            )}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            );
+          }
+
+          // Direct nav item (no sub-items)
+          const isActive = isActiveRoute(entry.route);
           return (
-            <div key={section.id} className="mb-2">
-              {/* Section header */}
-              {!collapsed && (
-                <button
-                  onClick={() => toggleSection(section.id)}
-                  className="flex w-full items-center gap-1 px-4 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider hover:text-slate-500"
-                >
-                  <ChevronDown size={10} className={cn('transition-transform', isSectionCollapsed && '-rotate-90')} />
-                  {section.label}
-                </button>
-              )}
-              {/* Items */}
-              {(!isSectionCollapsed || collapsed) && (
-                <ul className={cn('space-y-0.5', collapsed ? 'px-2' : 'px-2')}>
-                  {section.items.map((item) => {
-                    const isApproval = item.id === 'approvals';
-                    const hasPending = isApproval && pendingActions.length > 0;
-                    return (
-                      <li key={item.id} className="relative">
-                        <button onClick={() => handleNavClick(item)}
-                          className={cn(
-                            'flex w-full items-center gap-3 rounded-md px-3 py-2',
-                            'hover:bg-slate-200/60 transition-colors duration-150',
-                            'text-sm font-medium text-slate-600 hover:text-slate-900',
-                          )}
-                          title={collapsed ? item.label : undefined}>
-                          <span className="flex-shrink-0 text-slate-400">{item.icon}</span>
-                          {!collapsed && (
-                            <span className="flex flex-1 items-center justify-between truncate">
-                              <span>{item.label}</span>
-                              {hasPending && (
-                                <span className="ml-2 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1.5 text-[10px] font-bold text-white">
-                                  {pendingActions.length}
-                                </span>
-                              )}
-                            </span>
-                          )}
-                          {collapsed && hasPending && (
-                            <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[9px] font-bold text-white">
-                              {pendingActions.length > 9 ? '9+' : pendingActions.length}
-                            </span>
-                          )}
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
+            <div key={entry.id} className="mb-1">
+              <button
+                onClick={() => router.push(entry.route)}
+                className={cn(
+                  'flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors duration-150',
+                  collapsed ? 'justify-center px-2' : 'px-3',
+                  isActive
+                    ? 'bg-blue-50 text-blue-700 font-medium'
+                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900',
+                )}
+                title={collapsed ? entry.label : undefined}
+              >
+                <span className="flex-shrink-0 text-sm">{entry.icon}</span>
+                {!collapsed && <span>{entry.label}</span>}
+              </button>
             </div>
           );
         })}

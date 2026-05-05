@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .review_dimension import DimensionResult
+
 
 @dataclass(frozen=True)
 class CriterionResult:
@@ -48,6 +50,10 @@ class ReviewResult:
     issues_found: list[Issue] = field(default_factory=list)
     evidence_checked: list[str] = field(default_factory=list)
     harness_checked: bool = False
+
+    # 多维度评审结果（向后兼容，默认空列表）
+    dimension_results: list[DimensionResult] = field(default_factory=list)
+    overall_confidence: str = "high"  # high | medium | low
 
     @property
     def passed(self) -> bool:

@@ -28,50 +28,36 @@ def _switch_data_dir(project_dir: Path) -> AbstractContextManager[None]:
     """临时切换数据目录，退出时自动恢复"""
     import core.config
     import core.execution_ledger
-    import core.feature_tracker
     import core.progress_logger
-    import core.task_queue
 
     data_dir = project_dir / "data"
     original_data_dir = core.config.DATA_DIR
-    original_features_file = core.config.FEATURES_FILE
     original_progress_file = core.config.PROGRESS_FILE
-    original_task_db = core.config.TASK_DB
     original_prd_file = core.config.PRD_FILE
     original_project_state_file = core.config.PROJECT_STATE_FILE
     original_execution_ledger_file = core.config.EXECUTION_LEDGER_FILE
 
-    original_tracker_features_file = core.feature_tracker.FEATURES_FILE
     original_progress_logger_file = core.progress_logger.PROGRESS_FILE
-    original_task_queue_db = core.task_queue.TASK_DB
     original_ledger_file = core.execution_ledger.EXECUTION_LEDGER_FILE
 
     core.config.DATA_DIR = data_dir
-    core.config.FEATURES_FILE = core.config.DATA_DIR / "features.json"
     core.config.PROGRESS_FILE = core.config.DATA_DIR / "claude-progress.txt"
-    core.config.TASK_DB = core.config.DATA_DIR / "tasks.db"
     core.config.PRD_FILE = core.config.DATA_DIR / "prd.md"
     core.config.PROJECT_STATE_FILE = core.config.DATA_DIR / "project-state.json"
     core.config.EXECUTION_LEDGER_FILE = core.config.DATA_DIR / "execution-plan.json"
 
-    core.feature_tracker.FEATURES_FILE = core.config.FEATURES_FILE
     core.progress_logger.PROGRESS_FILE = core.config.PROGRESS_FILE
-    core.task_queue.TASK_DB = core.config.TASK_DB
     core.execution_ledger.EXECUTION_LEDGER_FILE = core.config.EXECUTION_LEDGER_FILE
     try:
         yield
     finally:
         core.config.DATA_DIR = original_data_dir
-        core.config.FEATURES_FILE = original_features_file
         core.config.PROGRESS_FILE = original_progress_file
-        core.config.TASK_DB = original_task_db
         core.config.PRD_FILE = original_prd_file
         core.config.PROJECT_STATE_FILE = original_project_state_file
         core.config.EXECUTION_LEDGER_FILE = original_execution_ledger_file
 
-        core.feature_tracker.FEATURES_FILE = original_tracker_features_file
         core.progress_logger.PROGRESS_FILE = original_progress_logger_file
-        core.task_queue.TASK_DB = original_task_queue_db
         core.execution_ledger.EXECUTION_LEDGER_FILE = original_ledger_file
 
 
@@ -213,23 +199,19 @@ def status(
     _validate_project_dir(project_dir)
 
     state_dir = project_dir / "data" / "dashboard"
-    if (state_dir / "state.json").exists():
-        from dashboard.state_repository import ProjectStateRepository
+    from dashboard.state_repository import ProjectStateRepository
 
-        repo = ProjectStateRepository(base_dir=state_dir, project_id=str(project_dir.name))
-        snapshot = repo.load_snapshot()
-        features = snapshot.features
-        summary = {
-            "total": len(features),
-            "done": sum(1 for f in features if f.status == "done"),
-            "in_progress": sum(1 for f in features if f.status == "in_progress"),
-            "blocked": sum(1 for f in features if f.status == "blocked"),
-            "pending": sum(1 for f in features if f.status == "pending"),
-        }
-        state = {"initialized": True, "features": summary}
-    else:
-        pm = ProjectManager(project_dir)
-        state = pm.get_status()
+    repo = ProjectStateRepository(base_dir=state_dir, project_id=str(project_dir.name))
+    snapshot = repo.load_snapshot()
+    features = snapshot.features
+    summary = {
+        "total": len(features),
+        "done": sum(1 for f in features if f.status == "done"),
+        "in_progress": sum(1 for f in features if f.status == "in_progress"),
+        "blocked": sum(1 for f in features if f.status == "blocked"),
+        "pending": sum(1 for f in features if f.status == "pending"),
+    }
+    state = {"initialized": True, "features": summary}
 
     console.print(Panel.fit(
         f"[bold]项目状态[/bold]\n"
@@ -244,6 +226,27 @@ def status(
     for key, value in features.items():
         table.add_row(key, str(value))
     console.print(table)
+
+    # Agent 状态摘要
+    agents = snapshot.agents
+    if agents:
+        status_counts: dict[str, int] = {}
+        for a in agents:
+            status_counts[a.status] = status_counts.get(a.status, 0) + 1
+        agent_table = Table(title="Agent 状态")
+        agent_table.add_column("状态", style="cyan")
+        agent_table.add_column("数量", style="green")
+        for status, count in sorted(status_counts.items()):
+            agent_table.add_row(status, str(count))
+        console.print(agent_table)
+
+    # 最近事件
+    events = repo.get_events_after(0, limit=10)
+    if events:
+        console.print("\n[bold]最近事件:[/bold]")
+        for evt in events:
+            ts = evt.timestamp.split("T")[1][:8] if "T" in evt.timestamp else evt.timestamp
+            console.print(f"  [{ts}] {evt.type} {evt.payload.get('feature_id', '') or ''}".strip())
 
     # 显示最近进度
     from core.progress_logger import progress
@@ -281,29 +284,22 @@ def plan(
     _validate_project_dir(project_dir)
 
     from core.execution_ledger import ExecutionLedger
-    from core.feature_tracker import FeatureTracker
     from dashboard.state_repository import ProjectStateRepository
 
-    features = None
     state_dir = project_dir / "data" / "dashboard"
     with _switch_data_dir(project_dir):
         ledger = ExecutionLedger()
         ledger_summary = ledger.get_summary()
-        if (state_dir / "state.json").exists():
-            repo = ProjectStateRepository(base_dir=state_dir, project_id=str(project_dir.name))
-            snapshot = repo.load_snapshot()
-            features = snapshot.features
-            summary = {
-                "total": len(features),
-                "done": sum(1 for f in features if f.status == "done"),
-                "in_progress": sum(1 for f in features if f.status == "in_progress"),
-                "blocked": sum(1 for f in features if f.status == "blocked"),
-                "pending": sum(1 for f in features if f.status == "pending"),
-            }
-        else:
-            tracker = FeatureTracker()
-            features = tracker.all_features()
-            summary = tracker.summary()
+        repo = ProjectStateRepository(base_dir=state_dir, project_id=str(project_dir.name))
+        snapshot = repo.load_snapshot()
+        features = snapshot.features
+        summary = {
+            "total": len(features),
+            "done": sum(1 for f in features if f.status == "done"),
+            "in_progress": sum(1 for f in features if f.status == "in_progress"),
+            "blocked": sum(1 for f in features if f.status == "blocked"),
+            "pending": sum(1 for f in features if f.status == "pending"),
+        }
 
     console.print(Panel.fit(
         f"[bold]Execution Plan Summary[/bold]\n"
@@ -335,10 +331,16 @@ def plan(
 
     blocked = [f for f in features if f.status == "blocked"]
     if blocked:
-        console.print("\n[bold red]Blocked features:[/bold red]")
+        from rich.tree import Tree
+        tree = Tree("[bold red]Blocked Features[/bold red]")
         for f in blocked:
             last_error = f.error_log[-1] if f.error_log else "Unknown"
-            console.print(f"  [red]{f.id}:[/red] {last_error}")
+            node = tree.add(f"[red]{f.id}[/red]")
+            node.add(f"  Description: {f.description}")
+            node.add(f"  Error: {last_error}")
+            if f.error_log and len(f.error_log) > 1:
+                node.add(f"  Retries: {len(f.error_log) - 1}")
+        console.print(tree)
 
 
 @app.command()
@@ -352,23 +354,6 @@ def blocked(
     from dashboard.state_repository import ProjectStateRepository
 
     state_dir = project_dir / "data" / "dashboard"
-    if not state_dir.exists():
-        console.print("[yellow]Dashboard 状态目录不存在，尝试从 feature_tracker 读取...[/yellow]")
-        with _switch_data_dir(project_dir):
-            from core.feature_tracker import FeatureTracker
-            tracker = FeatureTracker()
-            blocked_features = [f for f in tracker.all_features() if f.status == "blocked"]
-        if not blocked_features:
-            console.print("[green]No blocking issues.[/green]")
-            return
-        console.print(f"\n[bold]Blocking Issues ({len(blocked_features)})[/bold]\n")
-        for f in blocked_features:
-            last_error = f.error_log[-1] if f.error_log else "Unknown"
-            console.print(f"  [red][code_error][/red] {f.id}")
-            console.print(f"    Description: {last_error}")
-            console.print()
-        return
-
     repo = ProjectStateRepository(base_dir=state_dir, project_id=str(project_dir.name))
     issues = repo.list_blocking_issues(resolved=False)
 
@@ -412,14 +397,14 @@ def doctor(
     console.print("\n[bold]Project Directory:[/bold]")
     console.print(f"  {project_dir}: {'[green]EXISTS[/green]' if project_dir.exists() else '[red]MISSING[/red]'}")
 
-    # Feature 文件
+    # Dashboard 状态
     with _switch_data_dir(project_dir):
-        import core.config
-        console.print("\n[bold]Feature File:[/bold]")
-        if core.config.FEATURES_FILE.exists():
-            console.print(f"  {core.config.FEATURES_FILE}: [green]EXISTS[/green]")
+        console.print("\n[bold]Dashboard State:[/bold]")
+        state_file = project_dir / "data" / "dashboard" / "state.json"
+        if state_file.exists():
+            console.print(f"  {state_file}: [green]EXISTS[/green]")
         else:
-            console.print(f"  {core.config.FEATURES_FILE}: [red]MISSING[/red]")
+            console.print(f"  {state_file}: [yellow]NOT CREATED YET[/yellow]")
 
     # Task 数据库
     task_db = data_dir / "tasks.db"
@@ -507,26 +492,20 @@ def explain_state(
     project_dir = Path(directory).resolve()
     _validate_project_dir(project_dir)
 
-    from core.feature_tracker import FeatureTracker
     from dashboard.state_repository import ProjectStateRepository
 
     with _switch_data_dir(project_dir):
         state_dir = project_dir / "data" / "dashboard"
-        if (state_dir / "state.json").exists():
-            repo = ProjectStateRepository(base_dir=state_dir, project_id=str(project_dir.name))
-            snapshot = repo.load_snapshot()
-            features = snapshot.features
-            summary = {
-                "total": len(features),
-                "done": sum(1 for f in features if f.status == "done"),
-                "in_progress": sum(1 for f in features if f.status == "in_progress"),
-                "blocked": sum(1 for f in features if f.status == "blocked"),
-                "pending": sum(1 for f in features if f.status == "pending"),
-            }
-        else:
-            tracker = FeatureTracker()
-            features = tracker.all_features()
-            summary = tracker.summary()
+        repo = ProjectStateRepository(base_dir=state_dir, project_id=str(project_dir.name))
+        snapshot = repo.load_snapshot()
+        features = snapshot.features
+        summary = {
+            "total": len(features),
+            "done": sum(1 for f in features if f.status == "done"),
+            "in_progress": sum(1 for f in features if f.status == "in_progress"),
+            "blocked": sum(1 for f in features if f.status == "blocked"),
+            "pending": sum(1 for f in features if f.status == "pending"),
+        }
 
         console.print(Panel.fit(
             f"[bold]Project Status[/bold]\n"

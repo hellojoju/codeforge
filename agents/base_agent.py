@@ -239,3 +239,64 @@ class BaseAgent(ABC):
             return [f for f in result.stdout.strip().split("\n") if f]
         except subprocess.CalledProcessError:
             return []
+
+
+class DynamicAgent(BaseAgent):
+    """通用 Agent，通过配置而非 Python class 定义角色。"""
+
+    def __init__(self, project_dir: Path, role: str, prompt_file: str, display_name: str = "", execution_requirements: str = ""):
+        self._dynamic_role = role
+        self._dynamic_prompt_file = prompt_file
+        self._display_name = display_name
+        self._execution_requirements = execution_requirements
+        # 设置实例属性，覆盖 BaseAgent 的类属性
+        self.role = role
+        self.prompt_file = prompt_file
+        self.project_dir = Path(project_dir)
+        self.system_prompt = self._load_prompt()
+        self.permission_guard = PermissionGuard(self.project_dir)
+        self.event_bus = None
+
+    @property
+    def display_name(self) -> str:
+        return self._display_name or self._dynamic_role
+
+    def _build_prompt(self, task: dict) -> str:
+        feature_id = task.get("feature_id", "")
+        description = task.get("description", "")
+        category = task.get("category", "")
+        test_steps = task.get("test_steps", [])
+        prd = task.get("prd_summary", "")
+        deps = task.get("dependencies_context", "")
+        project_dir = task.get("project_dir", "")
+
+        steps_text = "\n".join(f"- {s}" for s in test_steps) if test_steps else "无具体测试步骤"
+
+        exec_req = self._execution_requirements or f"你是{self.display_name}，请根据任务要求完成工作。"
+
+        return f"""{self.system_prompt}
+
+---
+
+## 任务信息
+Feature ID: {feature_id}
+分类: {category}
+描述: {description}
+
+## 验收标准
+{steps_text}
+
+## 依赖上下文
+{deps}
+
+## PRD摘要
+{prd}
+
+## 工作目录
+{project_dir}
+
+## 执行要求
+1. {exec_req}
+2. 写入实际文件，不要只输出到终端
+3. 完成后验证结果的正确性
+"""

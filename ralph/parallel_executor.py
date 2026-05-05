@@ -16,7 +16,12 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from core.ralph_paths import resolve_ralph_dir
 import subprocess
 import threading
 import time
@@ -216,7 +221,12 @@ class WorktreeManager:
         if not wt_path.is_dir():
             return {"success": False, "error": f"Worktree {name} not found"}
 
-        branch = f"parallel/{name}"
+        # Look up actual branch from worktree (create() uses timestamped names)
+        branch_result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=wt_path, capture_output=True, text=True, timeout=10,
+        )
+        branch = branch_result.stdout.strip() or f"parallel/{name}"
 
         if strategy == "patch":
             result = self._patch_merge(name, target_branch)
@@ -259,10 +269,17 @@ class WorktreeManager:
         if not wt_path.is_dir():
             return {"success": False, "error": f"Worktree {name} not found"}
 
+        # Look up actual branch from worktree
+        branch_result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=wt_path, capture_output=True, text=True, timeout=10,
+        )
+        branch = branch_result.stdout.strip() or f"parallel/{name}"
+
         try:
-            # 从 worktree 的 HEAD 生成 patch
+            # From worktree's HEAD, generate diff against target_branch
             diff = subprocess.run(
-                ["git", "diff", target_branch, f"refs/heads/parallel/{name}", "--binary"],
+                ["git", "diff", f"{target_branch}..{branch}", "--binary"],
                 cwd=self._repo, capture_output=True, text=True, timeout=30,
             )
 
@@ -392,8 +409,6 @@ class ParallelExecutor:
         """获取下一批可执行的任务。"""
         with self._lock:
             running = sum(1 for t in self._tasks.values() if t.status == "running")
-            available = min(self._max - running, 0)  # 永远无法获取？
-            # Wait, that's wrong logic. Let me fix it.
             pending = [t for t in self._tasks.values()
                        if t.status == "pending"
                        and all(self._tasks.get(d) is not None
@@ -442,7 +457,7 @@ class MergeHandler:
         self._repo = repo_dir
 
     def merge(self, source_branch: str, target_branch: str = "main") -> dict:
-        """合并分支到目标分支。"""
+        """合并分支到目标分支。尝试自动解决冲突，失败则报告。"""
         try:
             subprocess.run(["git", "checkout", target_branch], cwd=self._repo,
                            capture_output=True, timeout=30)
@@ -452,7 +467,18 @@ class MergeHandler:
             )
             if result.returncode == 0:
                 return {"success": True, "merged": True, "message": "Clean merge"}
-            # 冲突检测
+
+            # 冲突：尝试 --strategy-option theirs 自动解决
+            subprocess.run(["git", "merge", "--abort"], cwd=self._repo,
+                           capture_output=True, timeout=10)
+            retry = subprocess.run(
+                ["git", "merge", source_branch, "--no-edit", "-X", "theirs"],
+                cwd=self._repo, capture_output=True, text=True, timeout=60,
+            )
+            if retry.returncode == 0:
+                return {"success": True, "merged": True, "message": "Auto-resolved with theirs strategy"}
+
+            # 仍然冲突，报告冲突文件
             conflict_files = self._detect_conflicts()
             return {
                 "success": False,
@@ -496,7 +522,7 @@ class RegressionTester:
         cmd = test_command or "python3 -m pytest -q"
         try:
             result = subprocess.run(
-                cmd.split(), cwd=self._project,
+                shlex.split(cmd), cwd=self._project,
                 capture_output=True, text=True, timeout=600,
             )
             passed = result.returncode == 0
@@ -529,7 +555,7 @@ class ParallelOrchestrator:
         self.integration = IntegrationQueue()
         self.merge_handler = MergeHandler(repo_dir)
         self.regression = RegressionTester(repo_dir)
-        self._lock_dir = repo_dir / ".ralph" / "locks"
+        self._lock_dir = resolve_ralph_dir(repo_dir) / "locks"
         self._lock_dir.mkdir(parents=True, exist_ok=True)
 
     async def dispatch_work_units(self, work_units: list, prd_summary: str = "") -> dict:

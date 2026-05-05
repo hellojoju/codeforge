@@ -5,12 +5,14 @@ import { usePathname } from 'next/navigation';
 import { MessageCircle, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Sidebar } from '@/components/ralph/sidebar';
+import { TopBar } from '@/components/ralph/top-bar';
 import { TabBar } from '@/components/ralph/tab-bar';
 import { RalphWebSocket } from '@/lib/ralph-websocket';
 import { useRalphStore, hydrateTabsFromStorage } from '@/lib/ralph-store';
 import type { Tab } from '@/lib/ralph-types';
 import { ChatDrawer } from '@/components/chat-drawer';
 import { GlobalSearch } from '@/components/ralph/global-search';
+import { RecoveryNotification } from '@/components/ralph/recovery-notification';
 
 export default function RalphLayout({ children }: { children: React.ReactNode }) {
   const [chatOpen, setChatOpen] = useState(false);
@@ -187,6 +189,9 @@ export default function RalphLayout({ children }: { children: React.ReactNode })
 
       {/* Main content area */}
       <div className="flex flex-1 flex-col overflow-hidden bg-white">
+        {/* Top bar */}
+        <TopBar />
+
         {/* Tab bar */}
         <TabBar />
 
@@ -198,6 +203,9 @@ export default function RalphLayout({ children }: { children: React.ReactNode })
 
       {/* Global search */}
       <GlobalSearch />
+
+      {/* Recovery notification */}
+      <RecoveryNotification />
 
       {/* Chat drawer */}
       <ChatDrawer open={chatOpen} onClose={() => setChatOpen(false)} />

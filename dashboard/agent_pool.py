@@ -1,6 +1,6 @@
 """AgentPool: 多实例 Agent 管理 + 文件锁冲突检测。"""
 
-from dashboard.models import AgentInstance
+from core.state_models import AgentInstance
 
 # 实例上限
 MAX_INSTANCES = {

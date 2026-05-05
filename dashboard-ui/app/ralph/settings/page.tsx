@@ -5,7 +5,7 @@
 'use client';
 
 import Link from 'next/link';
-import { ArrowRight, Cpu, Wrench, Bug } from 'lucide-react';
+import { ArrowRight, Cpu, Wrench, Bug, Users, Palette } from 'lucide-react';
 
 const SECTIONS = [
   {
@@ -13,6 +13,12 @@ const SECTIONS = [
     description: '管理 AI 模型提供商：API 密钥、默认模型、连通性测试',
     icon: <Cpu size={20} />,
     href: '/ralph/settings/providers',
+  },
+  {
+    title: 'Agent 配置',
+    description: '管理各角色 Agent 实例：角色定义、Prompt、工具分配、并发数',
+    icon: <Users size={20} />,
+    href: '/ralph/settings/agents',
   },
   {
     title: '工具链',
@@ -25,6 +31,12 @@ const SECTIONS = [
     description: 'Issue 源配置、自动分类规则、处理策略',
     icon: <Bug size={20} />,
     href: '/ralph/settings/issues',
+  },
+  {
+    title: '设计偏好',
+    description: '管理设计偏好记忆：风格积累、衰减权重、自动生成',
+    icon: <Palette size={20} />,
+    href: '/ralph/settings/taste',
   },
 ];
 

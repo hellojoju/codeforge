@@ -2,22 +2,12 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from dashboard.models import BlockingIssue
+from core.state_models import BlockingIssue, BlockingType
 
 if TYPE_CHECKING:
     from dashboard.state_repository import ProjectStateRepository
-
-
-class BlockingIssueType(StrEnum):
-    MISSING_ENV = "missing_env"
-    MISSING_CREDENTIALS = "missing_credentials"
-    EXTERNAL_SERVICE_DOWN = "external_service_down"
-    DEPENDENCY_NOT_MET = "dependency_not_met"
-    CODE_ERROR = "code_error"
-    RESOURCE_EXHAUSTED = "resource_exhausted"
 
 
 class BlockingTracker:
@@ -29,7 +19,7 @@ class BlockingTracker:
     def detect_missing_env(self, feature_id: str, variable: str) -> BlockingIssue:
         """检测缺失环境变量"""
         return self._create_issue(
-            issue_type=BlockingIssueType.MISSING_ENV,
+            issue_type=BlockingType.MISSING_ENV,
             feature_id=feature_id,
             description=f"Missing environment variable: {variable}",
             context={"variable": variable},
@@ -41,7 +31,7 @@ class BlockingTracker:
     ) -> BlockingIssue:
         """检测依赖未满足"""
         return self._create_issue(
-            issue_type=BlockingIssueType.DEPENDENCY_NOT_MET,
+            issue_type=BlockingType.DEPENDENCY_NOT_MET,
             feature_id=feature_id,
             description=f"Dependency {dep_id} not met: {reason}",
             context={"dependency": dep_id, "reason": reason},
@@ -51,7 +41,7 @@ class BlockingTracker:
     def detect_code_error(self, feature_id: str, error: str) -> BlockingIssue:
         """检测代码执行错误"""
         return self._create_issue(
-            issue_type=BlockingIssueType.CODE_ERROR,
+            issue_type=BlockingType.CODE_ERROR,
             feature_id=feature_id,
             description=f"Code execution failed: {error}",
             context={"error": error},
@@ -70,10 +60,28 @@ class BlockingTracker:
         """获取单个阻塞问题"""
         return self._repo.get_blocking_issue(issue_id)
 
+    def report_blocking(
+        self,
+        feature_id: str,
+        issue_type: BlockingType,
+        description: str,
+        context: dict | None = None,
+        agent_id: str = "",
+    ) -> BlockingIssue:
+        """Agent 统一上报阻塞问题的入口。"""
+        issue = self._create_issue(
+            issue_type=issue_type,
+            feature_id=feature_id,
+            description=description,
+            context={**(context or {}), "agent_id": agent_id} if agent_id else (context or {}),
+            detected_by=agent_id or "agent",
+        )
+        return issue
+
     def _create_issue(
         self,
         *,
-        issue_type: BlockingIssueType,
+        issue_type: BlockingType,
         feature_id: str,
         description: str,
         context: dict,

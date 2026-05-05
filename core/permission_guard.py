@@ -206,7 +206,8 @@ class PermissionGuard:
     def backup_file(self, file_path: Path, workspace_dir: Path | None = None) -> Path | None:
         """PROTECTED 操作：备份单个文件到 .ralph/backups/。"""
         target_dir = workspace_dir or self._project_dir
-        backup_dir = target_dir / ".ralph" / "backups"
+        from core.ralph_paths import resolve_ralph_dir
+        backup_dir = resolve_ralph_dir(workspace_dir or self._project_dir) / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
 
         if not file_path.exists():

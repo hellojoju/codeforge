@@ -1,10 +1,14 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { statusColor, statusLabel, formatDate } from '@/lib/ralph-utils';
-import type { WorkUnit, WorkUnitStatus, TaskHarness, ContextPack, ReviewResult, Transition } from '@/lib/ralph-types';
+import type { WorkUnit, WorkUnitStatus, TaskHarness, ContextPack, ReviewResult, Transition, RetroRecord } from '@/lib/ralph-types';
+import type { ReviewResultWithDimensions } from '@/lib/ralph-types';
+import { getRetro, getReviewMatrix } from '@/lib/ralph-api';
 import { EvidenceViewer } from './evidence-viewer';
 import { StreamLog } from './stream-log';
+import { ShipDialog } from './ship-dialog';
 import {
   Target,
   CheckCircle,
@@ -15,6 +19,12 @@ import {
   AlertCircle,
   FileText,
   GitBranch,
+  BookOpen,
+  Layers,
+  TrendingUp,
+  TrendingDown,
+  Wrench,
+  RotateCcw,
 } from 'lucide-react';
 
 interface WorkUnitDetailProps {
@@ -270,6 +280,192 @@ function TransitionTimeline({ transitions }: { transitions: Transition[] }) {
 }
 
 /**
+ * Retro 回顾卡片
+ */
+function RetroCard({ retro }: { retro: RetroRecord }) {
+  const categoryConfig: Record<string, { icon: typeof TrendingUp; color: string }> = {
+    went_well: { icon: TrendingUp, color: 'text-emerald-600' },
+    didnt_work: { icon: TrendingDown, color: 'text-red-600' },
+    to_improve: { icon: Wrench, color: 'text-amber-600' },
+  };
+
+  return (
+    <div className="rounded-sm border p-4 space-y-3">
+      <SectionTitle icon={BookOpen} title="经验回顾" />
+
+      <p className="text-sm text-foreground">{retro.summary}</p>
+
+      <div className="grid grid-cols-3 gap-3">
+        {Object.entries(categoryConfig).map(([key, { icon: Icon, color }]) => {
+          const count = retro.lessons.filter(l => l.category === key).length;
+          return (
+            <div key={key} className="text-center">
+              <Icon size={16} className={`mx-auto mb-1 ${color}`} />
+              <div className="text-lg font-bold">{count}</div>
+              <div className="text-xs text-muted-foreground">
+                {key === 'went_well' ? '做得好' : key === 'didnt_work' ? '未达预期' : '可改进'}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {retro.lessons.length > 0 && (
+        <ul className="space-y-1.5">
+          {retro.lessons.slice(0, 5).map((lesson, i) => (
+            <li key={i} className="flex items-start gap-2 text-xs text-slate-600">
+              <span className="w-1 h-1 rounded-full bg-slate-400 mt-1.5 shrink-0" />
+              {lesson.content}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 多维度评审概览
+ */
+function ReviewMatrixSummary({ review }: { review: ReviewResultWithDimensions }) {
+  const conclusionColors: Record<string, string> = {
+    '通过': 'bg-emerald-100 text-emerald-700',
+    '不通过': 'bg-red-100 text-red-700',
+    '跳过': 'bg-slate-100 text-slate-500',
+  };
+
+  return (
+    <div className="rounded-sm border p-4 space-y-3">
+      <SectionTitle icon={Layers} title="多维度评审" />
+
+      <div className="flex items-center gap-3">
+        <span className={cn('inline-flex items-center rounded-sm px-2 py-0.5 text-xs font-medium', conclusionColors[review.conclusion] || 'bg-slate-100 text-slate-500')}>
+          {review.conclusion}
+        </span>
+        <span className="text-xs text-muted-foreground">置信度: {review.overall_confidence}</span>
+      </div>
+
+      {review.dimension_results?.length > 0 && (
+        <div className="grid grid-cols-5 gap-2">
+          {review.dimension_results.map(dim => (
+            <div key={dim.dimension} className="text-center text-xs">
+              <div className={cn(
+                'inline-flex items-center rounded-sm px-1.5 py-0.5',
+                dim.conclusion === '通过' ? 'bg-emerald-50 text-emerald-700' :
+                dim.conclusion === '不通过' ? 'bg-red-50 text-red-700' :
+                'bg-slate-50 text-slate-500'
+              )}>
+                {dim.display_name || dim.dimension}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Checkpoint 列表与恢复
+ */
+interface CheckpointEntry {
+  work_id: string;
+  turn: number;
+  summary: string;
+  files_changed: string[];
+  error: string;
+  git_commit_sha: string;
+  created_at: string;
+}
+
+function CheckpointSection({ workId }: { workId: string }) {
+  const [checkpoints, setCheckpoints] = useState<CheckpointEntry[]>([]);
+  const [restoring, setRestoring] = useState<string | null>(null);
+  const [restoreMsg, setRestoreMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch(`/api/ralph/work-units/${workId}/checkpoints`)
+      .then(r => r.json())
+      .then(setCheckpoints)
+      .catch(() => {});
+  }, [workId]);
+
+  if (checkpoints.length === 0) return null;
+
+  const handleRestore = async (turn: number) => {
+    setRestoring(`${workId}.turn-${turn}`);
+    setRestoreMsg(null);
+    try {
+      const resp = await fetch(`/api/ralph/work-units/${workId}/checkpoints/${turn}/restore`, {
+        method: 'POST',
+      });
+      const data = await resp.json();
+      if (data.success) {
+        setRestoreMsg(`已恢复到 turn ${turn}${data.git_restored ? ' (git 已回退)' : ''}`);
+      } else {
+        setRestoreMsg(`恢复失败: ${data.error}`);
+      }
+    } catch (e: unknown) {
+      setRestoreMsg(`恢复异常: ${(e as Error).message}`);
+    } finally {
+      setRestoring(null);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white overflow-hidden">
+      <div className="px-5 py-3 border-b border-slate-100 bg-slate-50/50">
+        <div className="flex items-center gap-2">
+          <span className="text-sm">📍</span>
+          <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">执行检查点</h3>
+        </div>
+      </div>
+
+      <div className="divide-y divide-slate-50">
+        {checkpoints.map(cp => (
+          <div key={cp.turn} className="px-5 py-3 flex items-start gap-3">
+            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-100 text-xs font-bold text-blue-600 flex-shrink-0">
+              {cp.turn}
+            </span>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs text-slate-700">{cp.summary || '（无摘要）'}</p>
+              {cp.git_commit_sha && (
+                <code className="text-[10px] font-mono text-slate-400">{cp.git_commit_sha.slice(0, 8)}</code>
+              )}
+              {cp.error && (
+                <p className="text-[10px] text-red-500 mt-0.5">{cp.error}</p>
+              )}
+            </div>
+            <button
+              onClick={() => handleRestore(cp.turn)}
+              disabled={restoring !== null}
+              className={cn(
+                'flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] font-medium transition-colors',
+                restoring === `${workId}.turn-${cp.turn}`
+                  ? 'border-slate-200 text-slate-400 cursor-wait'
+                  : 'border-blue-200 text-blue-600 hover:bg-blue-50',
+              )}
+            >
+              <RotateCcw size={10} />
+              恢复
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {restoreMsg && (
+        <div className={cn(
+          'px-5 py-2 text-xs border-t',
+          restoreMsg.startsWith('已恢复') ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-red-50 text-red-700 border-red-100',
+        )}>
+          {restoreMsg}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * WorkUnit 详情组件
  *
  * 展示 WorkUnit 的完整信息：
@@ -282,6 +478,19 @@ function TransitionTimeline({ transitions }: { transitions: Transition[] }) {
  * - 元信息
  */
 export function WorkUnitDetail({ workUnit, reviews = [], transitions = [] }: WorkUnitDetailProps) {
+  const [retro, setRetro] = useState<RetroRecord | null>(null);
+  const [reviewMatrix, setReviewMatrix] = useState<ReviewResultWithDimensions | null>(null);
+  const [showShip, setShowShip] = useState(false);
+
+  useEffect(() => {
+    // 加载 Retro
+    getRetro(workUnit.work_id).then(setRetro).catch(() => {});
+    // 加载多维度评审
+    getReviewMatrix(workUnit.work_id).then(setReviewMatrix).catch(() => {});
+  }, [workUnit.work_id]);
+
+  const isTerminalStatus = ['accepted', 'failed', 'blocked'].includes(workUnit.status);
+
   return (
     <div className="space-y-5">
       {/* 头部区域 */}
@@ -292,6 +501,14 @@ export function WorkUnitDetail({ workUnit, reviews = [], transitions = [] }: Wor
             <h1 className="text-xl font-bold text-foreground">{workUnit.title}</h1>
           </div>
           <StatusBadge status={workUnit.status} />
+          {workUnit.status === 'accepted' && (
+            <button
+              onClick={() => setShowShip(true)}
+              className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 transition-colors"
+            >
+              发布
+            </button>
+          )}
         </div>
 
         {workUnit.background && (
@@ -395,6 +612,25 @@ export function WorkUnitDetail({ workUnit, reviews = [], transitions = [] }: Wor
         <TransitionTimeline transitions={transitions} />
       </div>
 
+      {/* 经验回顾（终态 WorkUnit 才显示） */}
+      {isTerminalStatus && retro && (
+        <div id="section-retro" className="scroll-mt-16">
+          <RetroCard retro={retro} />
+        </div>
+      )}
+
+      {/* 多维度评审 */}
+      {reviewMatrix && reviewMatrix.dimension_results?.length > 0 && (
+        <div id="section-review-matrix" className="scroll-mt-16">
+          <ReviewMatrixSummary review={reviewMatrix} />
+        </div>
+      )}
+
+      {/* 执行检查点 */}
+      <div id="section-checkpoints" className="scroll-mt-16">
+        <CheckpointSection workId={workUnit.work_id} />
+      </div>
+
       {/* 元信息 */}
       <div id="section-meta" className="rounded-sm border p-4 scroll-mt-16">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -428,6 +664,10 @@ export function WorkUnitDetail({ workUnit, reviews = [], transitions = [] }: Wor
           </div>
         </div>
       </div>
+
+      {showShip && (
+        <ShipDialog workId={workUnit.work_id} onClose={() => setShowShip(false)} onShipped={() => setShowShip(false)} />
+      )}
     </div>
   );
 }

@@ -67,15 +67,69 @@ class VerificationManager:
 
     def verify_multi_size_screenshots(
         self, checklist: VerificationChecklist,
+        base_url: str = "http://localhost:3000",
     ) -> VerificationChecklist:
+        pw = self._find_playwright()
+        if not pw:
+            return self._stub_screenshots(checklist)
+
+        for w, h in checklist.screenshot_sizes:
+            evidence_dir = self._dir / "evidence" / checklist.work_id
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            shot_path = evidence_dir / f"screenshot_{w}x{h}.png"
+            script_path = evidence_dir / f"_pw_{w}x{h}.py"
+
+            script = self._generate_screenshot_script(base_url, w, h, str(shot_path))
+            script_path.write_text(script, encoding="utf-8")
+
+            try:
+                result = subprocess.run(
+                    ["python", str(script_path)],
+                    capture_output=True, text=True, timeout=30,
+                )
+                passed = result.returncode == 0 and Path(shot_path).exists()
+                checklist.checks.append({
+                    "check_name": f"screenshot:{w}x{h}",
+                    "passed": passed,
+                    "evidence": str(shot_path) if passed else None,
+                    "notes": result.stderr[:200] if not passed else "OK",
+                })
+            except (subprocess.TimeoutExpired, Exception) as e:
+                checklist.checks.append({
+                    "check_name": f"screenshot:{w}x{h}",
+                    "passed": False,
+                    "evidence": None,
+                    "notes": str(e),
+                })
+        return checklist
+
+    def _stub_screenshots(self, checklist: VerificationChecklist) -> VerificationChecklist:
+        """无 Playwright 时生成占位 check。"""
         for w, h in checklist.screenshot_sizes:
             checklist.checks.append({
                 "check_name": f"screenshot:{w}x{h}",
                 "passed": False,
-                "evidence": f"Playwright screenshot at {w}x{h} viewport",
-                "notes": f"Save screenshot at {w}x{h}",
+                "evidence": None,
+                "notes": "Playwright 未安装，跳过",
             })
         return checklist
+
+    @staticmethod
+    def _generate_screenshot_script(url: str, width: int, height: int, output: str) -> str:
+        return f'''import asyncio
+from playwright.async_api import async_playwright
+
+async def main():
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch()
+        context = await browser.new_context(viewport={{"width": {width}, "height": {height}}})
+        page = await context.new_page()
+        await page.goto("{url}", wait_until="networkidle")
+        await page.screenshot(path="{output}")
+        await browser.close()
+
+asyncio.run(main())
+'''
 
     def capture_console_errors(self, url: str) -> list[dict]:
         """使用 Playwright 捕获页面控制台错误。"""
@@ -96,9 +150,11 @@ class VerificationManager:
             "  });"
             "});"
         )
+
+        cmd_prefix = [playwright] if not playwright.startswith("npx") else ["npx", "playwright"]
         try:
             result = subprocess.run(
-                [playwright, "script", url, "-e", js_code],
+                cmd_prefix + ["script", url, "-e", js_code],
                 capture_output=True, text=True, timeout=15,
             )
             return [{"captured": True, "url": url, "stdout": result.stdout[:500]}]
@@ -111,10 +167,11 @@ class VerificationManager:
         if not playwright:
             return []
 
+        cmd_prefix = [playwright] if not playwright.startswith("npx") else ["npx", "playwright"]
         try:
             # 使用 playwright trace 记录网络请求
             result = subprocess.run(
-                [playwright, "trace", "view", "--trace-file", url],
+                cmd_prefix + ["trace", "view", "--trace-file", url],
                 capture_output=True, text=True, timeout=15,
             )
             return [{"captured": True, "url": url}]
@@ -127,6 +184,7 @@ class VerificationManager:
         if not playwright:
             return []
 
+        cmd_prefix = [playwright] if not playwright.startswith("npx") else ["npx", "playwright"]
         js_code = f"""
         const results = [];
         const urls = [{url!r}];
@@ -144,14 +202,66 @@ class VerificationManager:
         """
         try:
             result = subprocess.run(
-                [playwright, "script", url, "-e", js_code],
+                cmd_prefix + ["script", url, "-e", js_code],
                 capture_output=True, text=True, timeout=30,
             )
             return [{"clicked": True, "url": url, "stdout": result.stdout[:1000]}]
         except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
             return [{"clicked": False, "error": "Exploratory test failed"}]
 
+    def generate_test_file(
+        self,
+        work_id: str,
+        title: str,
+        acceptance_criteria: list[str],
+        scope_allow: list[str],
+        test_command: str = "",
+        output_dir: Path | None = None,
+    ) -> Path | None:
+        """从 WorkUnit 验收标准自动生成测试文件骨架。"""
+        if not acceptance_criteria:
+            return None
+
+        out_dir = output_dir or (Path(__file__).parent.parent / "tests" / "ralph_generated")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        test_file = out_dir / f"test_{work_id.lower().replace('-', '_')}.py"
+
+        lines = [
+            f'"""Auto-generated tests for WorkUnit: {title}"""',
+            "",
+            "import pytest",
+            "",
+            "",
+        ]
+        for i, criterion in enumerate(acceptance_criteria):
+            safe_name = f"test_{work_id.lower().replace('-', '_')}_{i}"
+            lines.extend([
+                f"def {safe_name}():",
+                f'    """验收标准: {criterion}"""',
+                "    # TODO: 实现测试逻辑",
+                f'    # 验收标准原文: "{criterion}"',
+                f"    # 涉及文件: {', '.join(scope_allow)}",
+                "    assert True  # placeholder",
+                "",
+                "",
+            ])
+
+        if test_command:
+            lines.append(f"# 测试命令: {test_command}")
+            lines.append("")
+
+        test_file.write_text("\n".join(lines), encoding="utf-8")
+        return test_file
+
     def _find_playwright(self) -> str | None:
+        """查找 Playwright 可执行文件。
+
+        搜索顺序：
+        1. 本地 node_modules/.bin/playwright
+        2. npx playwright
+        3. 全局 playwright CLI (pip / brew 安装)
+        """
+        # 1. 本地 node_modules
         candidates = [
             str(Path.cwd() / "dashboard-ui" / "node_modules" / ".bin" / "playwright"),
             str(Path.cwd() / "node_modules" / ".bin" / "playwright"),
@@ -159,6 +269,29 @@ class VerificationManager:
         for c in candidates:
             if Path(c).is_file():
                 return c
+
+        # 2. npx playwright
+        try:
+            result = subprocess.run(
+                ["npx", "playwright", "--version"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                return "npx playwright"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # 3. 全局 playwright CLI
+        try:
+            result = subprocess.run(
+                ["playwright", "--version"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                return "playwright"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
         return None
 
     def run_tests(self, test_command: str = "", project_dir: Path | None = None) -> dict:

@@ -15,21 +15,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from pathlib import Path
 from typing import Any
 
+from core.ralph_paths import resolve_ralph_dir
 from ralph.claude_runner import ClaudeCodeRunner, ExecutionResult
 from ralph.config_manager import RalphConfigManager
 from ralph.context_pack_manager import ContextPackManager
 from ralph.evidence_collector import EvidenceCollector
+from ralph.guard_coordinator import GuardCoordinator
 from ralph.harness_manager import HarnessManager
 from ralph.memory_manager import MemoryManager
 from ralph.repository import RalphRepository
 from ralph.review_manager import ReviewManager, ReviewRequest
 from ralph.schema.review_result import ReviewResult
 from ralph.schema.work_unit import WorkUnit, WorkUnitStatus
+from ralph.schema.state_unified import BlockingType
 
 logger = logging.getLogger(__name__)
 
@@ -44,16 +48,23 @@ class WorkUnitEngine:
     def __init__(self, project_dir: Path, event_bus: Any = None,
                  memory_manager: MemoryManager | None = None) -> None:
         self._project_dir = Path(project_dir)
-        ralph_dir = self._project_dir / ".ralph"
-        self._repository = RalphRepository(ralph_dir)
+        self._ralph_dir = resolve_ralph_dir(self._project_dir)
+        self._repository = RalphRepository(self._ralph_dir)
         self._harness_mgr = HarnessManager()
         self._context_mgr = ContextPackManager(self._project_dir)
-        self._evidence_collector = EvidenceCollector(ralph_dir)
+        self._evidence_collector = EvidenceCollector(self._ralph_dir)
         self._review_mgr = ReviewManager()
         self._runner = ClaudeCodeRunner(self._project_dir)
-        self._config_mgr = RalphConfigManager(ralph_dir)
+        self._guard = GuardCoordinator()
+        self._config_mgr = RalphConfigManager(self._ralph_dir)
         self._event_bus = event_bus
-        self._memory = memory_manager or MemoryManager(ralph_dir)
+        self._memory = memory_manager or MemoryManager(self._ralph_dir, project_dir=self._project_dir)
+        # 知识图谱 — 用于查询历史教训
+        try:
+            from ralph.knowledge_graph import KnowledgeGraphService
+            self._knowledge_graph = KnowledgeGraphService(self._ralph_dir)
+        except ImportError:
+            self._knowledge_graph = None
 
     def _emit_event(self, event_type: str, **kwargs: Any) -> None:
         """发送 Ralph 事件到 Dashboard（如果有 event_bus）。"""
@@ -61,11 +72,57 @@ class WorkUnitEngine:
             self._event_bus.emit(event_type, **kwargs)
 
     def _archive_if_terminal(self, work_id: str, exec_log: str = "") -> None:
-        """终态自动归档到记忆系统。"""
+        """终态自动归档到记忆系统并触发反思回顾。"""
         unit = self._repository.get_work_unit(work_id)
         if unit and unit.status.value in ("accepted", "failed", "blocked"):
             from dataclasses import asdict
-            self._memory.on_work_unit_completed(asdict(unit), exec_log)
+
+            unit_dict = asdict(unit)
+            # asdict 不会把 Enum 转为 .value，手动转换
+            unit_dict["status"] = unit.status.value
+
+            self._memory.on_work_unit_completed(unit_dict, exec_log)
+            # 触发反思回顾
+            retro_result = self._memory.trigger_retro(unit_dict, exec_log)
+            # 自动调参
+            self._apply_retro_tuning(unit_dict, exec_log)
+
+            # 阻塞时自动创建 UnifiedBlockingIssue
+            if unit.status.value == "blocked":
+                self._auto_create_blocking_issue(unit, exec_log)
+            # 自动生成 follow-up WorkUnit
+            self._create_retro_follow_ups(retro_result)
+
+    def _auto_create_blocking_issue(self, unit: WorkUnit, exec_log: str = "") -> None:
+        """WorkUnit 进入 blocked 时自动创建 UnifiedBlockingIssue。"""
+        from ralph.schema.state_unified import UnifiedBlockingIssue
+
+        error = unit.error or unit.blocking_reason or ""
+        # 从 error 推断阻塞类型
+        btype = BlockingType.UNEXPECTED_RUNTIME_ERROR
+        error_lower = error.lower()
+        if any(k in error_lower for k in ("api_key", "api key", "credentials", "secret")):
+            btype = BlockingType.MISSING_CREDENTIALS
+        elif any(k in error_lower for k in ("env", "environment")):
+            btype = BlockingType.MISSING_ENV
+        elif any(k in error_lower for k in ("timeout", "unavailable", "connection")):
+            btype = BlockingType.EXTERNAL_SERVICE_DOWN
+        elif any(k in error_lower for k in ("permission", "denied", "forbidden")):
+            btype = BlockingType.SCOPE_VIOLATION
+        elif any(k in error_lower for k in ("budget", "token", "limit", "rate")):
+            btype = BlockingType.RESOURCE_EXHAUSTED
+
+        issue = UnifiedBlockingIssue(
+            blocking_id=f"auto_{unit.work_id}_{unit.updated_at[:10] if unit.updated_at else 'now'}",
+            type=btype,
+            title=f"WorkUnit {unit.work_id} 阻塞: {error[:80] if error else unit.title[:80]}",
+            details=f"WorkUnit: {unit.work_id}\nTitle: {unit.title}\nError: {error}",
+            required_human_action=f"查看 WorkUnit {unit.work_id} 日志后人工处理",
+            related_task_id=unit.work_id,
+            status="open",
+        )
+        self._repository.save_blocking_issue(issue)
+        logger.info("自动创建阻塞项: %s type=%s", issue.blocking_id, btype)
 
     def create_work_unit(self, unit: WorkUnit) -> WorkUnit:
         """创建并保存 WorkUnit（初始状态 draft）。"""
@@ -135,7 +192,12 @@ class WorkUnitEngine:
 
         # 生成 ContextPack
         try:
-            context_pack = self._context_mgr.build(unit, prd_fragment=prd_summary)
+            lessons = self._collect_retro_lessons(unit)
+            context_pack = self._context_mgr.build(
+                unit,
+                prd_fragment=prd_summary,
+                lessons_learned=lessons,
+            )
         except ValueError as e:
             logger.error("上下文包超出 budget: %s", e)
             unit = self._repository.transition(
@@ -166,6 +228,11 @@ class WorkUnitEngine:
 
         # 开始执行中记录
         self._harness_mgr.start_inflight(work_id)
+
+        # 加载并应用历史 Retro 调参建议
+        tuning = self._config_mgr.load_tuning()
+        if tuning:
+            self._apply_tuning_to_unit(unit, tuning)
 
         # 调用执行器
         if use_claude_runner:
@@ -251,14 +318,33 @@ class WorkUnitEngine:
         scope_deny = unit.scope_deny or (harness.scope_deny if harness else [])
         acceptance_criteria = unit.acceptance_criteria or []
 
+        # 4.1: 输入语义扫描 + 正则黑名单 + Canary Token
         context_text = str(context_pack)
+        cleaned_context, ctx_violations = self._guard.check_input(context_text)
+        cleaned_prd, prd_violations = self._guard.check_input(prd_summary)
+
+        # 4.1b: 嵌入 Canary Token — 用于输出泄露检测
+        cleaned_context = self._guard.embed_canary(cleaned_context)
+
+        # 4.1c: Taste Memory 注入 — 将设计偏好注入到上下文
+        taste_ctx = self._memory.get_taste_context() if self._memory else ""
+        if taste_ctx:
+            cleaned_context = f"{cleaned_context}\n{taste_ctx}"
+
+        all_violations = ctx_violations + prd_violations
+        if all_violations:
+            logger.warning(
+                "WorkUnit %s: 检测到 %d 条注入模式 → 已清理",
+                unit.work_id,
+                len(all_violations),
+            )
 
         def _stream_cb(event_type: str, chunk: str) -> None:
             self._emit_event("ralph_stream_chunk", work_id=unit.work_id, chunk_type=event_type, text=chunk)
 
-        return await self._runner.execute_streaming(
+        result = await self._runner.execute_streaming(
             work_id=unit.work_id,
-            context_pack_text=context_text,
+            context_pack_text=cleaned_context,
             harness_text=harness_text,
             scope_allow=scope_allow,
             scope_deny=scope_deny,
@@ -266,6 +352,19 @@ class WorkUnitEngine:
             stream_callback=_stream_cb,
             cwd=tool_cwd,
         )
+
+        # 4.1: 输出验证 — canary 泄露 + 危险操作检测
+        if result.stdout:
+            is_safe, output_violations = self._guard.check_output(result.stdout)
+            if not is_safe:
+                logger.warning(
+                    "WorkUnit %s: 输出验证失败 — %s",
+                    unit.work_id,
+                    [v.get("type") for v in output_violations],
+                )
+                result.stdout = "[输出被拦截：检测到安全风险]"
+
+        return result
 
     async def _execute_with_agent(
         self,
@@ -311,6 +410,7 @@ class WorkUnitEngine:
         """独立审查：needs_review → accepted/needs_rework/blocked。
 
         由调度 agent 调用，根据审查结论做状态决策。
+        集成 SkillBridge：根据 work_type 选择 skill + rules 混合审查。
         """
         unit = self._repository.get_work_unit(work_id)
         if unit is None:
@@ -326,7 +426,57 @@ class WorkUnitEngine:
                 with contextlib.suppress(OSError):
                     diff_stat = Path(ev.file_path).read_text(encoding="utf-8")
 
-        # 构建审查请求
+        evidence_dict = {
+            "files": [e.file_path for e in evidence_list],
+            "diff_summary": diff_stat,
+        }
+
+        # SkillBridge 混合审查
+        skill_result = None
+        try:
+            from ralph.skill_bridge import SkillBridge
+            from ralph.rules_engine import RulesEngine
+            from ralph.rules_engine import register_builtin_rules
+
+            rules_engine = RulesEngine()
+            register_builtin_rules(rules_engine)
+
+            bridge = SkillBridge(rules_engine=rules_engine)
+            skill_result = bridge.execute_review(
+                work_id=work_id,
+                work_type=unit.work_type.value if hasattr(unit.work_type, "value") else unit.work_type,
+                evidence=evidence_dict,
+                diff_summary=diff_stat,
+            )
+            logger.info(
+                "SkillBridge 审查: work_id=%s skill=%s %s",
+                work_id, skill_result.skill_name, skill_result.summary,
+            )
+        except ImportError as e:
+            logger.debug("SkillBridge 不可用，使用基线审查: %s", e)
+
+        # 多维度评审矩阵
+        matrix_review = None
+        try:
+            from ralph.review_matrix import ReviewMatrixEngine
+            config_mgr = RalphConfigManager(self._ralph_dir)
+            matrix_engine = ReviewMatrixEngine(config_mgr=config_mgr, project_dir=self._project_dir)
+            matrix_review = asyncio.run(matrix_engine.execute_review(
+                work_id=work_id,
+                evidence=evidence_dict,
+                work_type=unit.work_type,
+                acceptance_criteria=unit.acceptance_criteria,
+                diff_summary=diff_stat,
+            ))
+            self._repository.save_review(matrix_review)
+            logger.info("多维度评审完成: work_id=%s conclusion=%s", work_id, matrix_review.conclusion)
+        except RuntimeError as e:
+            # asyncio.run() 不能在已有事件循环中调用，使用基线审查
+            logger.warning("多维度评审跳过(事件循环冲突): %s", e)
+        except Exception as e:
+            logger.warning("多维度评审失败，使用基线审查: %s", e)
+
+        # 构建审查请求（基线审查）
         request = ReviewRequest(
             work_id=work_id,
             diff_summary=diff_stat,
@@ -337,8 +487,42 @@ class WorkUnitEngine:
             scope_deny=unit.scope_deny,
         )
 
-        # 独立审查
+        # 独立审查（基线）
         review = self._review_mgr.review(request)
+
+        # 合并 SkillBridge 发现的问题
+        if skill_result and skill_result.issues:
+            review = ReviewResult(
+                work_id=review.work_id,
+                reviewer_context_id=review.reviewer_context_id,
+                review_type=review.review_type,
+                conclusion=review.conclusion,
+                recommended_action=review.recommended_action,
+                criteria_results=review.criteria_results,
+                issues_found=review.issues_found + [
+                    {"description": i.description, "severity": i.severity, "suggested_action": i.suggested_action}
+                    for i in skill_result.issues
+                ],
+                evidence_checked=review.evidence_checked,
+                harness_checked=review.harness_checked,
+                skill_review={
+                    "skill_name": skill_result.skill_name,
+                    "summary": skill_result.summary,
+                    "focus_checks": skill_result.focus_checks,
+                },
+                dimension_results=matrix_review.dimension_results if matrix_review else None,
+                overall_confidence=matrix_review.overall_confidence if matrix_review else None,
+            )
+
+        # 如果多维度评审有更严格的结论，采用之
+        if matrix_review is not None:
+            if matrix_review.conclusion == "不通过" and review.conclusion == "通过":
+                review.conclusion = "不通过"
+            if matrix_review.issues_found:
+                if not hasattr(review, "issues_found") or not review.issues_found:
+                    review.issues_found = []
+                review.issues_found.extend(matrix_review.issues_found)
+
         self._repository.save_review(review)
 
         # 状态决策
@@ -371,3 +555,119 @@ class WorkUnitEngine:
 
     def list_work_units(self, status: WorkUnitStatus | None = None) -> list[WorkUnit]:
         return self._repository.list_work_units(status)
+
+    # ── Reflect 闭环 ─────────────────────────────────────────
+
+    def _collect_retro_lessons(self, unit: WorkUnit) -> list[str]:
+        """基于 WorkUnit 关键词查询相关历史教训。"""
+        if self._knowledge_graph is None:
+            return []
+
+        lessons: list[str] = []
+
+        # L2: 图谱影响面检索 — 如果 scope_allow 包含文件路径，查询影响面
+        for file_path in (unit.scope_allow or []):
+            impact = self._knowledge_graph.query_impact(file_path, max_depth=2)
+            if impact.get("found"):
+                for task in impact.get("direct_tasks", []):
+                    if task.get("status") in ("failed", "needs_rework"):
+                        lessons.append(
+                            f"[图谱影响面] {task.get('label', '')} "
+                            f"曾因修改 {file_path} 而{task.get('status', '')}"
+                        )
+
+        # L1: 关键词匹配历史教训
+        text = f"{unit.title} {unit.target}".lower()
+        topic_map: dict[str, list[str]] = {
+            "timeout": ["超时", "timeout", "render", "加载"],
+            "rework": ["返工", "重构", "修改"],
+            "scope_violation": ["scope", "范围", "边界"],
+            "test_failure": ["测试", "test", "验证"],
+        }
+        matched_topics: list[str] = []
+        for topic, phrases in topic_map.items():
+            if any(p in text for p in phrases):
+                matched_topics.append(topic)
+        matched_topics.append("rework")  # 通用防返工
+
+        for topic in set(matched_topics):
+            results = self._knowledge_graph.query_retros_by_topic(topic)
+            for r in results:
+                lesson = r.get("lesson", "")
+                if lesson:
+                    severity = r.get("severity", "")
+                    lessons.append(
+                        f"[历史教训:{topic}] {lesson}"
+                        + (f" (级别:{severity})" if severity else "")
+                    )
+
+        if lessons:
+            logger.info("WorkUnit %s: 注入 %d 条历史教训", unit.work_id, len(lessons))
+        return lessons
+
+    def _apply_retro_tuning(self, unit_dict: dict, exec_log: str) -> None:
+        """Retro 完成后自动调参，保存调整建议。"""
+        if self._memory is None or self._memory._retro_service is None:
+            return
+
+        keywords = [
+            unit_dict.get("work_type", ""),
+            unit_dict.get("title", "")[:20],
+        ]
+        adjustments = self._memory._retro_service.auto_tune_params(keywords)
+        if adjustments:
+            self._config_mgr.save_tuning(adjustments)
+            logger.info("Retro 自动调参已保存: %s", adjustments)
+
+    def _apply_tuning_to_unit(self, unit: Any, tuning: dict) -> None:
+        """将历史调参建议应用到当前 WorkUnit 的执行配置。
+
+        Args:
+            unit: WorkUnit 实例
+            tuning: load_tuning() 返回的调参 dict
+        """
+        # timeout 倍增 — 针对历史超时频发的任务类型
+        timeout_multiplier = tuning.get("timeout_multiplier")
+        if timeout_multiplier and timeout_multiplier > 1.0 and unit.task_harness:
+            original_timeout = unit.task_harness.timeout or 300
+            unit.task_harness.timeout = int(original_timeout * timeout_multiplier)
+            logger.info("调参应用: timeout %d → %d (×%.1f)", original_timeout, unit.task_harness.timeout, timeout_multiplier)
+
+        # 启用中间检查 — 针对历史频繁返工的任务
+        if tuning.get("enable_intermediate_checks") and unit.task_harness:
+            unit.task_harness.intermediate_checks = True
+            logger.info("调参应用: 启用中间检查")
+
+        # 严格 scope 限制 — 针对历史频繁越界
+        if tuning.get("strict_scope_enforcement"):
+            if unit.task_harness and unit.task_harness.scope_allow:
+                # scope_allow 已有值时，不做额外收紧（避免过度约束）
+                pass
+            elif not unit.scope_allow:
+                # 无显式 scope_allow 时，收紧为项目目录
+                unit.scope_allow = [str(self._project_dir)]
+                logger.info("调参应用: 启用严格 scope 限制")
+
+    def _create_retro_follow_ups(self, retro_record: Any) -> None:
+        """基于 Retro 自动生成 follow-up WorkUnit 并保存。"""
+        if retro_record is None or self._memory is None:
+            return
+
+        retro_service = getattr(self._memory, "_retro_service", None)
+        if retro_service is None:
+            return
+
+        if not hasattr(retro_service, "create_follow_up_work_units"):
+            return
+
+        follow_ups = retro_service.create_follow_up_work_units(retro_record)
+        if follow_ups:
+            import json
+            follow_up_path = self._ralph_dir / "follow_ups"
+            follow_up_path.mkdir(parents=True, exist_ok=True)
+
+            for fu in follow_ups:
+                work_id = fu.get("work_id", "")
+                fu_path = follow_up_path / f"{work_id}.json"
+                fu_path.write_text(json.dumps(fu, indent=2, ensure_ascii=False))
+                logger.info("Retro follow-up WorkUnit 已保存: %s", work_id)

@@ -10,10 +10,8 @@ DATA_DIR = PROJECT_ROOT / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 # 运行时文件
-FEATURES_FILE = DATA_DIR / "features.json"
 PROGRESS_FILE = DATA_DIR / "claude-progress.txt"
 PROJECT_STATE_FILE = DATA_DIR / "project-state.json"
-TASK_DB = DATA_DIR / "tasks.db"
 PRD_FILE = DATA_DIR / "prd.md"
 
 # Prompts目录

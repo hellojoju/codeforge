@@ -32,6 +32,8 @@ const ANCHOR_ITEMS: AnchorItem[] = [
   { id: 'section-stream-log', label: '执行日志' },
   { id: 'section-reviews', label: '审查结果' },
   { id: 'section-transitions', label: '状态流转' },
+  { id: 'section-retro', label: '经验回顾' },
+  { id: 'section-review-matrix', label: '多维评审' },
   { id: 'section-meta', label: '元信息' },
 ];
 

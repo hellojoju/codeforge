@@ -17,18 +17,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agents import AGENT_ROLES, AgentPool
-from core.blocking_tracker import BlockingIssueType, BlockingTracker
-from core.config import (
-    GIT_AUTHOR_EMAIL,
-    GIT_AUTHOR_NAME,
-    MAX_RETRY_COUNT,
-)
+from core.blocking_tracker import BlockingTracker
+from core.state_models import BlockingType
+from core.config import MAX_RETRY_COUNT
 from core.execution_ledger import ExecutionLedger, ExecutionStatus
-from core.permission_guard import PERMISSION_RULES_PROMPT, PermissionGuard
+from core.permission_guard import PermissionGuard
 from core.feature_execution_service import FeatureExecutionService
 from core.feature_tracker import Feature, FeatureTracker
 from core.feature_verification_service import FeatureVerificationService
 from core.git_service import GitService
+from core.project_initializer import ProjectInitializer
 from core.progress_logger import progress
 
 if TYPE_CHECKING:
@@ -64,7 +62,10 @@ class ProjectManager:
         self.feature_execution = FeatureExecutionService(self, self.pool, self.feature_tracker)
         self.feature_verification = FeatureVerificationService(self.project_dir)
         self.git_service = GitService(self.project_dir)
-        self.execution_ledger = ExecutionLedger(self.project_dir / "data" / "execution-plan.json")
+        self.execution_ledger = ExecutionLedger(
+            self.project_dir / "data" / "execution-plan.json",
+            repository=self.repository,
+        )
         self.blocking_tracker = BlockingTracker(self.repository)
         self._ensure_all_roles()
         self._restore_state()
@@ -91,43 +92,11 @@ class ProjectManager:
             self._initialized = True
 
     def initialize_project(self, user_request: str) -> str:
-        """
-        Phase 1: 初始化项目
-        - 与用户交互生成PRD（这里用单次生成，实际可多轮）
-        - 分解features
-        - 初始化git仓库
-        - 创建项目骨架
-
-        Args:
-            user_request: 用户的原始需求描述
-
-        Returns:
-            PRD摘要
-        """
-        progress.log(f"项目启动: {user_request}")
-
-        # 初始化git
-        self._init_git()
-
-        # 生成PRD和Features
-        prd_summary, features = self._generate_prd_and_features(user_request)
-
-        # 确保项目数据目录存在
-        project_data = self.project_dir / "data"
-        project_data.mkdir(parents=True, exist_ok=True)
-
-        # 保存PRD
-        prd_file = project_data / "prd.md"
-        prd_file.write_text(prd_summary, encoding="utf-8")
-
-        # 导入Features — 直接写入 Repository
-        for f in features:
-            self.repository.upsert_feature(f)
-
-        progress.log(f"PRD生成完成，分解为 {len(features)} 个features")
+        """初始化项目：委托给 ProjectInitializer。"""
+        initializer = ProjectInitializer(self.project_dir, self.permission_guard)
+        prd = initializer.initialize(user_request, self.repository.upsert_feature)
         self._initialized = True
-
-        return prd_summary
+        return prd
 
     def run_execution_loop(self) -> dict:
         """
@@ -171,7 +140,7 @@ class ProjectManager:
             self._mark_feature_blocked(
                 feature,
                 reason=f"未知角色: {feature.assigned_to}",
-                issue_type=BlockingIssueType.CODE_ERROR,
+                issue_type=BlockingType.CODE_ERROR,
                 detected_by="coordinator",
                 context={"assigned_to": feature.assigned_to},
             )
@@ -259,7 +228,7 @@ class ProjectManager:
                         self._mark_feature_blocked(
                             feature,
                             reason=f"验收不通过，已重试{MAX_RETRY_COUNT}次",
-                            issue_type=BlockingIssueType.CODE_ERROR,
+                            issue_type=BlockingType.CODE_ERROR,
                             detected_by="verification",
                             context={"stage": "verification"},
                             agent_id=instance.instance_id,
@@ -341,7 +310,7 @@ class ProjectManager:
         status: str,
         current_feature: str | None = None,
     ) -> None:
-        from dashboard.models import AgentInstance as DashboardAgent
+        from core.state_models import AgentInstance as DashboardAgent
 
         live_instance = self.pool.get_instance(getattr(instance, "instance_id", ""))
 
@@ -411,20 +380,20 @@ class ProjectManager:
 
         self._log(f"从 workspace 合并 {merged_count} 个文件到项目根目录")
 
-    def _infer_blocking_issue_type(self, error: str) -> BlockingIssueType:
+    def _infer_blocking_issue_type(self, error: str) -> BlockingType:
         lower = error.lower()
         if "api key" in lower or "credential" in lower or "token" in lower:
-            return BlockingIssueType.MISSING_CREDENTIALS
+            return BlockingType.MISSING_CREDENTIALS
         if "environment variable" in lower or "not found" in lower and "claude" in lower:
-            return BlockingIssueType.MISSING_ENV
-        return BlockingIssueType.CODE_ERROR
+            return BlockingType.MISSING_ENV
+        return BlockingType.CODE_ERROR
 
     def _mark_feature_blocked(
         self,
         feature: Feature,
         *,
         reason: str,
-        issue_type: BlockingIssueType,
+        issue_type: BlockingType,
         detected_by: str,
         context: dict | None = None,
         agent_id: str = "",
@@ -453,253 +422,13 @@ class ProjectManager:
             description=issue.description,
         )
 
-    def _verify_feature(self, feature: Feature, *, workspace_dir: Path | None = None) -> bool:
-        """真正的验收验证：文件存在性 + 语法检查 + E2E 测试步骤"""
-        target_dir = workspace_dir or self.project_dir
-        self._log(f"开始验收 {feature.id} (目录: {target_dir})")
-
-        # 1. 检查 Agent 产出的文件是否存在
-        expected_files = self._infer_expected_files(feature, base_dir=target_dir)
-        missing_files = [f for f in expected_files if not (target_dir / f).exists()]
-        if missing_files:
-            self._log(f"{feature.id} 验收失败：缺少文件 {missing_files}")
-            return False
-
-        # 2. 语法检查
-        syntax_errors = self._run_syntax_checks(expected_files, base_dir=target_dir)
-        if syntax_errors:
-            self._log(f"{feature.id} 验收失败：语法错误 {syntax_errors}")
-            return False
-
-        # 3. 如果有测试步骤，运行 E2E 验证
-        if feature.test_steps:
-            e2e_passed = self._run_e2e_validation(feature.id, feature.test_steps)
-            if not e2e_passed:
-                self._log(f"{feature.id} E2E 验证未通过")
-                return False
-
-        self._log(f"{feature.id} 验收通过")
-        return True
-
-    def _infer_expected_files(self, feature: Feature, *, base_dir: Path | None = None) -> list[str]:
-        """根据 feature 的类别推断应该产出的文件"""
-        target = base_dir or self.project_dir
-        category_file_map = {
-            "backend": ["src/api/", "src/models/", "src/services/"],
-            "frontend": ["src/components/", "src/pages/", "src/views/"],
-            "database": ["migrations/", "src/models/", "src/db/"],
-            "qa": ["tests/", "test/"],
-            "security": ["src/middleware/", "src/auth/", "src/validators/"],
-            "ui": ["src/components/", "src/styles/", "public/"],
-            "docs": ["docs/", "README.md", "CHANGELOG.md"],
-            "pm": ["docs/", "PRD.md", "prd.md"],
-            "architect": ["docs/", "architecture.md", "DESIGN.md"],
-        }
-
-        dirs_to_check = category_file_map.get(feature.category, ["src/"])
-
-        # 扫描项目目录，找出匹配类别的文件
-        expected = []
-        for dir_name in dirs_to_check:
-            full_dir = target / dir_name
-            if full_dir.is_dir():
-                for ext in ("*.py", "*.ts", "*.tsx", "*.js", "*.jsx", "*.md", "*.sql", "*.json"):
-                    expected.extend([
-                        str(p.relative_to(target))
-                        for p in full_dir.rglob(ext)
-                    ])
-
-        # 至少检查根目录的关键文件
-        for root_file in ("main.py", "app.py", "package.json", "requirements.txt", "pyproject.toml"):
-            if (target / root_file).exists():
-                expected.append(root_file)
-
-        return expected
-
-    def _run_syntax_checks(self, files: list[str], *, base_dir: Path | None = None) -> list[str]:
-        """对文件运行语法检查"""
-        target = base_dir or self.project_dir
-        errors = []
-
-        for file_path in files:
-            full_path = target / file_path
-            if not full_path.exists():
-                continue
-
-            if file_path.endswith(".py"):
-                result = subprocess.run(
-                    [sys.executable, "-m", "py_compile", str(full_path)],
-                    capture_output=True,
-                    timeout=10,
-                )
-                if result.returncode != 0:
-                    stderr = result.stderr.decode("utf-8", errors="replace")
-                    errors.append(f"{file_path}: {stderr[:200]}")
-
-            elif file_path.endswith((".js", ".ts", ".jsx", ".tsx")):
-                result = subprocess.run(
-                    ["node", "--check", str(full_path)],
-                    capture_output=True,
-                    timeout=10,
-                )
-                if result.returncode != 0:
-                    stderr = result.stderr.decode("utf-8", errors="replace")
-                    errors.append(f"{file_path}: {stderr[:200]}")
-
-            elif file_path.endswith(".sql"):
-                # SQL 文件基本检查：不为空且有内容
-                content = full_path.read_text(encoding="utf-8").strip()
-                if not content:
-                    errors.append(f"{file_path}: 文件为空")
-
-        return errors
-
-    def _run_e2e_validation(self, feature_id: str, test_steps: list[str]) -> bool:
-        """运行 E2E 验证测试步骤"""
-        from testing.e2e_runner import E2ERunner
-
-        runner = E2ERunner(project_dir=self.project_dir)
-        result = runner.run_test_steps(feature_id, test_steps)
-        return result.get("passed", False)
-
-    def _generate_prd_and_features(self, user_request: str) -> tuple[str, list[Feature]]:
-        """用Claude CLI生成PRD和Feature分解"""
-        project_data = self.project_dir / "data"
-        project_data.mkdir(parents=True, exist_ok=True)
-        output_file = project_data / "prd.json"
-
-        prompt = f"""你是一个资深产品经理和技术架构师。请严格按以下要求完成任务。
-
-**重要任务：你必须生成一个JSON文件并写入指定路径，不要输出任何其他文字。**
-
-用户需求：{user_request}
-
-请完成以下任务：
-
-1. 写一份简洁的PRD（产品需求文档），包含：
-   - 产品概述
-   - 核心功能
-   - 技术选型建议
-   - 非功能需求（性能、安全、可扩展性）
-
-2. 将功能分解为具体的features，每个feature要求：
-   - 足够小，一个Agent能在一次会话内完成
-   - 有明确的验收标准
-   - 标注依赖关系
-   - 标注优先级（P0-P3）
-   - 指定负责的Agent角色（backend/frontend/database/qa/ui/security/docs）
-
-**你必须将以下JSON内容写入文件：{output_file}**
-
-JSON结构：
-{{
-  "prd_summary": "PRD内容字符串",
-  "features": [
-    {{
-      "id": "F001",
-      "category": "backend",
-      "description": "用户可以注册账号",
-      "priority": "P0",
-      "assigned_to": "backend",
-      "dependencies": [],
-      "test_steps": ["访问注册页面", "填写表单", "提交成功"]
-    }}
-  ]
-}}
-
-确保features按合理的执行顺序排列，依赖关系正确。
-**只执行一个操作：将JSON写入 {output_file}，不要输出任何其他内容。**"""
-
-        # 执行前安全检查
-        pre_check = self.permission_guard.check_prompt(prompt)
-        if not pre_check.allowed:
-            violations = [v.detail for v in pre_check.blocked_violations]
-            raise RuntimeError(f"PRD generation blocked by permission guard: {violations}")
-
-        full_prompt = prompt + "\n\n" + PERMISSION_RULES_PROMPT
-
-        result = subprocess.run(
-            ["claude", "-p", full_prompt, "--permission-mode", "acceptEdits"],
-            capture_output=True,
-            timeout=300,
-            cwd=str(self.project_dir),
-        )
-
-        stderr_text = result.stderr.decode("utf-8", errors="replace")
-
-        if result.returncode != 0:
-            raise RuntimeError(f"Claude CLI PRD generation failed (rc={result.returncode}): {stderr_text}")
-
-        # 等待文件写入完成（模型可能异步写入）
-        import time
-        max_wait = 30
-        waited = 0
-        while not output_file.exists() and waited < max_wait:
-            time.sleep(1)
-            waited += 1
-
-        if not output_file.exists():
-            raise RuntimeError(f"Claude CLI did not write JSON to {output_file}. stderr: {stderr_text[:500]}")
-
-        json_str = output_file.read_text(encoding="utf-8")
-        if not json_str.strip():
-            raise RuntimeError(f"Claude CLI wrote empty JSON to {output_file}")
-
-        data = json.loads(json_str)
-        prd_summary = data["prd_summary"]
-        features = [Feature(**f) for f in data["features"]]
-
-        return prd_summary, features
-
     def _ensure_all_roles(self) -> None:
         """确保所有已知角色都有足够数量的 agent 实例。"""
         for role, count in ROLE_INSTANCE_COUNTS.items():
             if role in AGENT_ROLES:
                 self.pool.ensure_instances(role, count)
 
-    def _init_git(self) -> None:
-        """初始化git仓库"""
-        try:
-            subprocess.run(
-                ["git", "init", "-b", "main"],
-                cwd=self.project_dir,
-                capture_output=True,
-                check=True,
-            )
-            subprocess.run(
-                ["git", "config", "user.name", GIT_AUTHOR_NAME],
-                cwd=self.project_dir,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "config", "user.email", GIT_AUTHOR_EMAIL],
-                cwd=self.project_dir,
-                capture_output=True,
-            )
-            progress.log("git仓库初始化完成")
-        except subprocess.CalledProcessError:
-            # 可能已经初始化过了
-            pass
 
-    def _git_commit(self, message: str) -> bool:
-        import subprocess
-        try:
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=self.project_dir,
-                capture_output=True,
-                check=True,
-            )
-            subprocess.run(
-                ["git", "commit", "-m", message, "--allow-empty"],
-                cwd=self.project_dir,
-                capture_output=True,
-                check=True,
-            )
-            progress.log(f"git commit: {message}")
-            return True
-        except subprocess.CalledProcessError:
-            return False
 
     def _log(self, message: str) -> None:
         progress.log(f"[PM] {message}")

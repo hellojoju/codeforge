@@ -1,4 +1,10 @@
-/** Dashboard 全局状态 store (Zustand) — 对接后端真实数据。 */
+/** Dashboard 全局状态 store (Zustand) — 对接后端真实数据。
+
+ * TanStack Query 已引入（见 lib/query-client.ts + hooks/），
+ * 新组件请优先使用 useFeatures()、useBlockingIssues() 等 hooks。
+ *
+ * 此 store 保留 WebSocket 实时更新 + 向后兼容。
+ */
 
 import { create } from 'zustand'
 import type { AgentWithSilence, Feature, DashboardEvent, ChatMessage, Command, ModuleAssignment, ExecutionStatus, EventStreamItem, BlockingIssue } from './types'
@@ -16,9 +22,10 @@ import {
   getAgentEvents,
   listBlockingIssues,
 } from './api'
+import { queryClient } from '@/lib/query-client'
+import { queryKeys } from '@/lib/query-keys'
 
 interface DashboardState {
-  // 核心数据
   projectId: string
   lastEventId: number
   agents: AgentWithSilence[]
@@ -31,12 +38,9 @@ interface DashboardState {
   connectionStatus: 'connecting' | 'connected' | 'disconnected' | 'error'
   executionStatus: ExecutionStatus
   executionError: string | null
-
-  // Agent 管理
   agentDetails: Map<string, AgentWithSilence>
   eventStream: EventStreamItem[]
 
-  // 操作
   setProjectId: (id: string) => void
   loadSnapshot: () => Promise<void>
   loadEvents: () => Promise<void>
@@ -44,7 +48,6 @@ interface DashboardState {
   pushEvent: (event: DashboardEvent) => void
   setConnectionStatus: (status: 'connecting' | 'connected' | 'disconnected' | 'error') => void
 
-  // 控制命令
   approve: (targetId: string) => Promise<{ command_id: string }>
   reject: (targetId: string) => Promise<{ command_id: string }>
   pause: (targetId: string) => Promise<{ command_id: string }>
@@ -52,20 +55,15 @@ interface DashboardState {
   retry: (targetId: string) => Promise<{ command_id: string }>
   skip: (targetId: string) => Promise<{ command_id: string }>
 
-  // 执行控制
   startExecution: () => Promise<void>
   stopExecution: () => Promise<void>
   fetchExecutionStatus: () => Promise<void>
-
-  // Agent 管理操作
   fetchAgents: () => Promise<void>
   fetchAgentDetail: (agentId: string) => Promise<void>
   sendMessage: (agentId: string, message: string) => Promise<void>
   interruptAgent: (agentId: string, force?: boolean) => Promise<void>
   fetchEvents: (agentId?: string) => Promise<void>
   fetchBlockingIssues: () => Promise<void>
-
-  // 聊天操作
   addChatMessage: (message: ChatMessage) => void
 }
 
@@ -88,7 +86,6 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   eventStream: [],
 
   setProjectId: (id) => set({ projectId: id }),
-
   setConnectionStatus: (status) => set({ connectionStatus: status }),
 
   loadSnapshot: async () => {
@@ -131,14 +128,16 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
 
   applyEvent: (event) => {
     applyEventToState(event, set)
+    // 同时 invalidate TanStack Query keys，使 hooks 自动刷新
+    invalidateQueriesForEvent(event)
   },
 
-  approve: (targetId: string) => actions.approve(targetId, get().projectId),
-  reject: (targetId: string) => actions.reject(targetId, get().projectId),
-  pause: (targetId: string) => actions.pause(targetId, get().projectId),
-  resume: (targetId: string) => actions.resume(targetId, get().projectId),
-  retry: (targetId: string) => actions.retry(targetId, get().projectId),
-  skip: (targetId: string) => actions.skip(targetId, get().projectId),
+  approve: (targetId) => actions.approve(targetId, get().projectId),
+  reject: (targetId) => actions.reject(targetId, get().projectId),
+  pause: (targetId) => actions.pause(targetId, get().projectId),
+  resume: (targetId) => actions.resume(targetId, get().projectId),
+  retry: (targetId) => actions.retry(targetId, get().projectId),
+  skip: (targetId) => actions.skip(targetId, get().projectId),
 
   startExecution: async () => {
     try {
@@ -170,17 +169,14 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
       const result = await getExecutionStatus()
       set({ executionStatus: result.status, executionError: result.error })
     } catch {
-      // 静默失败，可能是后端未配置 coordinator
+      // 后端可能未配置 coordinator
     }
   },
 
-  // Agent 管理
   fetchAgents: async () => {
     try {
       const { agents: apiAgents } = await listAgents()
-      // 更新基础 agent 列表
       set({ agents: apiAgents })
-      // 填充详情缓存
       set((state) => {
         const next = new Map(state.agentDetails)
         for (const agent of apiAgents) {
@@ -189,7 +185,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         return { agentDetails: next }
       })
     } catch {
-      // 静默失败，后端可能未启动
+      // 后端可能未启动
     }
   },
 
@@ -240,7 +236,6 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     }
   },
 
-  // 聊天操作
   addChatMessage: (message) => {
     set((state) => ({
       chatHistory: [...state.chatHistory, message],
@@ -248,7 +243,28 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   },
 }))
 
-/** 从事件更新内部状态。 */
+function invalidateQueriesForEvent(event: DashboardEvent) {
+  switch (event.type) {
+    case 'feature_updated':
+    case 'feature_status_changed':
+      queryClient.invalidateQueries({ queryKey: queryKeys.features() })
+      break
+    case 'agent_status_changed':
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents() })
+      break
+    case 'blocking_issue_created':
+    case 'blocking_issue_resolved':
+      queryClient.invalidateQueries({ queryKey: queryKeys.blockingIssues() })
+      break
+    case 'execution_status_changed':
+      queryClient.invalidateQueries({ queryKey: queryKeys.executionStatus() })
+      queryClient.invalidateQueries({ queryKey: queryKeys.ralphSnapshot() })
+      break
+    default:
+      queryClient.invalidateQueries({ queryKey: queryKeys.stateSnapshot() })
+  }
+}
+
 function applyEventToState(
   event: DashboardEvent,
   set: (partial: Partial<DashboardState> | ((s: DashboardState) => Partial<DashboardState>)) => void,
@@ -258,7 +274,6 @@ function applyEventToState(
     let features = state.features
     let chatHistory = state.chatHistory
     let blockingIssues = state.blockingIssues
-    // 聊天事件不进入 events 日志流
     let events = state.events
 
     if (event.type === 'agent_status_changed' && event.payload.agent_id) {
@@ -317,7 +332,6 @@ function applyEventToState(
       )
     }
 
-    // 处理 PM 回复事件，路由到 chatHistory 而非 events
     if (event.type === 'pm_response' && event.payload.pm_response) {
       const pm = event.payload.pm_response as Record<string, string | undefined>
       const pmMsg: ChatMessage = {
@@ -329,7 +343,6 @@ function applyEventToState(
       }
       chatHistory = [...state.chatHistory, pmMsg]
     } else {
-      // 非聊天事件才进入 events 日志
       events = [...state.events, event].slice(-200)
     }
 

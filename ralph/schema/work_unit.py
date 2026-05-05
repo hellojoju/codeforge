@@ -30,6 +30,7 @@ class WorkUnitStatus(Enum):
     NEEDS_REWORK = "needs_rework"
     BLOCKED = "blocked"
     ACCEPTED = "accepted"
+    INTERRUPTED = "interrupted"  # 系统中断（重启/kill），非代码错误
 
 
 # 允许的状态转换 — 对齐 AI 协议 §7.1
@@ -40,6 +41,7 @@ ALLOWED_TRANSITIONS: dict[WorkUnitStatus, list[WorkUnitStatus]] = {
         WorkUnitStatus.NEEDS_REVIEW,
         WorkUnitStatus.FAILED,
         WorkUnitStatus.BLOCKED,
+        WorkUnitStatus.INTERRUPTED,
     ],
     WorkUnitStatus.NEEDS_REVIEW: [
         WorkUnitStatus.ACCEPTED,
@@ -50,6 +52,10 @@ ALLOWED_TRANSITIONS: dict[WorkUnitStatus, list[WorkUnitStatus]] = {
     WorkUnitStatus.NEEDS_REWORK: [WorkUnitStatus.READY],
     WorkUnitStatus.BLOCKED: [WorkUnitStatus.READY],
     WorkUnitStatus.ACCEPTED: [],  # 终态
+    WorkUnitStatus.INTERRUPTED: [
+        WorkUnitStatus.READY,
+        WorkUnitStatus.FAILED,
+    ],
 }
 
 

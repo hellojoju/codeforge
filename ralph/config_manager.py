@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 
 
+from core.ralph_paths import resolve_ralph_dir
+
+
 def _now_iso() -> str:
     from datetime import UTC, datetime
 
@@ -296,12 +299,52 @@ class RalphConfigManager:
 
     # --- Agent Definitions ---
 
+    _BUILTIN_AGENT_DEFAULTS = [
+        {"role": "architect", "display_name": "系统架构师", "prompt_file": "architect.md", "agent_class": "base", "max_instances": 1, "enabled": True},
+        {"role": "backend", "display_name": "后端开发工程师", "prompt_file": "backend_dev.md", "agent_class": "base", "max_instances": 1, "enabled": True},
+        {"role": "frontend", "display_name": "前端开发工程师", "prompt_file": "frontend_dev.md", "agent_class": "base", "max_instances": 1, "enabled": True},
+        {"role": "qa", "display_name": "QA测试工程师", "prompt_file": "qa_tester.md", "agent_class": "base", "max_instances": 1, "enabled": True},
+        {"role": "product", "display_name": "产品经理", "prompt_file": "product_manager.md", "agent_class": "product_manager", "max_instances": 1, "enabled": True},
+        {"role": "ui_designer", "display_name": "UI/UX设计师", "prompt_file": "ui_designer.md", "agent_class": "base", "max_instances": 1, "enabled": True},
+        {"role": "database", "display_name": "数据库专家", "prompt_file": "database_expert.md", "agent_class": "base", "max_instances": 1, "enabled": True},
+        {"role": "security", "display_name": "安全工程师", "prompt_file": "security_reviewer.md", "agent_class": "base", "max_instances": 1, "enabled": True},
+        {"role": "docs", "display_name": "技术文档工程师", "prompt_file": "docs_writer.md", "agent_class": "base", "max_instances": 1, "enabled": True},
+    ]
+
+    def _prompts_dir(self) -> Path:
+        """获取 prompts 目录路径。"""
+        return Path(__file__).parent.parent / "prompts"
+
     def list_agent_definitions(self) -> list[dict]:
-        return self._read_json("agent-definitions.json", [])
+        defs = self._read_json("agent-definitions.json", [])
+        if not defs:
+            self._write_json("agent-definitions.json", [dict(d) for d in self._BUILTIN_AGENT_DEFAULTS])
+            defs = [dict(d) for d in self._BUILTIN_AGENT_DEFAULTS]
+        # 附加 prompt_content
+        prompts_dir = self._prompts_dir()
+        for d in defs:
+            pf = d.get("prompt_file", f"{d['role']}.md")
+            if not pf.endswith(".md"):
+                pf += ".md"
+            prompt_path = prompts_dir / pf
+            if prompt_path.exists():
+                d["prompt_content"] = prompt_path.read_text(encoding="utf-8")
+        return defs
 
     def save_agent_definition(self, agent_def: dict) -> dict:
         agent_def["updated_at"] = _now_iso()
-        defs = self.list_agent_definitions()
+        # 同步 prompt_content 到 prompts/ 文件
+        prompt_content = agent_def.pop("prompt_content", None)
+        if prompt_content:
+            prompts_dir = self._prompts_dir()
+            pf = agent_def.get("prompt_file", f"{agent_def.get('role', 'unknown')}.md")
+            if not pf.endswith(".md"):
+                pf += ".md"
+            prompt_path = prompts_dir / pf
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            prompt_path.write_text(prompt_content, encoding="utf-8")
+
+        defs = self.list_agent_definitions_raw()
         for i, d in enumerate(defs):
             if d.get("role") == agent_def.get("role"):
                 defs[i] = agent_def
@@ -311,11 +354,16 @@ class RalphConfigManager:
         self._write_json("agent-definitions.json", defs)
         return agent_def
 
+    def list_agent_definitions_raw(self) -> list[dict]:
+        """读取原始定义，不附加 prompt_content。"""
+        return self._read_json("agent-definitions.json", [])
+
     def delete_agent_definition(self, role: str) -> bool:
-        defs = [d for d in self.list_agent_definitions() if d.get("role") != role]
-        if len(defs) == len(self.list_agent_definitions()):
+        defs = self.list_agent_definitions_raw()
+        new_defs = [d for d in defs if d.get("role") != role]
+        if len(new_defs) == len(defs):
             return False
-        self._write_json("agent-definitions.json", defs)
+        self._write_json("agent-definitions.json", new_defs)
         return True
 
     # --- Agent-Level Provider Config ---
@@ -521,6 +569,20 @@ class RalphConfigManager:
             ) if budget.get("enabled") else False,
         }
 
+    # ── Review Matrix ──────────────────────────────────────
+
+    def get_review_matrix_config(self) -> list[dict]:
+        """获取评审矩阵配置。"""
+        from ralph.review_matrix import _DEFAULT_DIMENSIONS
+        return [asdict(d) for d in _DEFAULT_DIMENSIONS]
+
+    def save_review_matrix_config(self, config: list[dict]) -> list[dict]:
+        """保存评审矩阵配置。"""
+        path = self._ralph_dir / "config" / "review-matrix.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, ensure_ascii=False, indent=2))
+        return config
+
     def check_budget(self) -> dict:
         """检查当前 token 用量是否超限。
 
@@ -587,3 +649,24 @@ class RalphConfigManager:
                 continue
 
         return None
+
+    # ── Auto-tuning ────────────────────────────────────────
+
+    def save_tuning(self, adjustments: dict) -> None:
+        """保存自动调参建议。"""
+        from datetime import UTC, datetime
+
+        tuning_path = self._dir / "tuning.json"
+        existing = {}
+        if tuning_path.is_file():
+            try:
+                existing = json.loads(tuning_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        existing.update(adjustments)
+        existing["updated_at"] = datetime.now(UTC).isoformat()
+        self._write_json("tuning.json", existing)
+
+    def load_tuning(self) -> dict:
+        """加载自动调参建议。"""
+        return self._read_json("tuning.json", {})

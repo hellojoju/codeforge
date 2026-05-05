@@ -11,7 +11,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dashboard.models import (
+from core.state_models import (
     AgentInstance,
     BlockingIssue,
     ChatMessage,
@@ -46,6 +46,7 @@ class ProjectStateRepository:
         self._chat_history: list[ChatMessage] = []
         self._module_assignments: dict[str, ModuleAssignment] = {}
         self._blocking_issues: dict[str, BlockingIssue] = {}
+        self._executions: list[dict] = []
         self._next_event_id = 0
         self._snapshot_version = 0
 
@@ -326,6 +327,38 @@ class ProjectStateRepository:
                 issues = [i for i in issues if i.resolved == resolved]
             return issues
 
+    # --- Execution History ---
+
+    def log_execution(self, entry: dict) -> dict:
+        """记录一次执行历史。"""
+        with self._lock:
+            self._executions.append(entry)
+            self._save()
+            return entry
+
+    def get_execution_history(self, feature_id: str | None = None) -> list[dict]:
+        """获取执行历史，可选按 feature_id 过滤。"""
+        with self._lock:
+            if feature_id is None:
+                return list(self._executions)
+            return [e for e in self._executions if e.get("feature_id") == feature_id]
+
+    def get_execution_summary(self) -> dict:
+        """返回执行历史汇总统计。"""
+        with self._lock:
+            total = len(self._executions)
+            completed = sum(1 for e in self._executions if e.get("status") == "completed")
+            failed = sum(1 for e in self._executions if e.get("status") == "failed")
+            blocked = sum(1 for e in self._executions if e.get("status") == "blocked")
+            retrying = sum(1 for e in self._executions if e.get("status") == "retrying")
+            return {
+                "total_executions": total,
+                "completed": completed,
+                "failed": failed,
+                "blocked": blocked,
+                "retrying": retrying,
+            }
+
     # --- Workspace filtering (多实例隔离预留) ---
 
     def get_agents_by_workspace(self, workspace_id: str) -> list[AgentInstance]:
@@ -348,6 +381,7 @@ class ProjectStateRepository:
             "chat_history": [m.to_dict() for m in self._chat_history],
             "module_assignments": [m.to_dict() for m in self._module_assignments.values()],
             "blocking_issues": [i.to_dict() for i in self._blocking_issues.values()],
+            "executions": self._executions,
             "next_event_id": self._next_event_id,
         }
         tmp_fd, tmp_path = tempfile.mkstemp(dir=self._base, suffix=".tmp")
@@ -380,3 +414,4 @@ class ProjectStateRepository:
             i["issue_id"]: BlockingIssue.from_dict(i)
             for i in state.get("blocking_issues", [])
         }
+        self._executions = state.get("executions", [])

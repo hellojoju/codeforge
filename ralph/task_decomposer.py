@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from dataclasses import dataclass, field
 from ralph.schema.work_unit import WorkUnit, WorkUnitStatus
 from ralph.schema.task_harness import TaskHarness, RetryPolicy, TimeoutPolicy
 from ralph.schema.prd_document import PRDDocument
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -106,6 +109,20 @@ class TaskDecomposer:
                     test_command=sub.get("test_command", ""),
                     rollback_strategy=sub.get("rollback_strategy", "git checkout -- ."),
                 )
+
+                # D3.6.3: 成本评估（完整实现 vs shortcut）
+                cost_est = self._estimate_cost(wu)
+                if cost_est["shortcut_chosen"]:
+                    logger.warning(
+                        "选择 shortcut 原因：%s [work_id=%s]",
+                        cost_est["shortcut_reason"],
+                        wu_id,
+                    )
+                    # 记录到 WorkUnit 的 metadata 中（如果有）
+                    wu._metadata = {  # type: ignore
+                        "cost_est": cost_est,
+                    }
+
                 work_units.append(wu)
 
             story.work_units = work_ids
@@ -243,3 +260,44 @@ class TaskDecomposer:
             data.append(d)
         path = self._dir / "decomposed_tasks.json"
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+
+    # D3.6.3: 成本评估
+
+    def _estimate_cost(self, wu: WorkUnit) -> dict:
+        """估算完整实现 vs shortcut 的成本对比。
+
+        返回:
+            {
+                "complete_time_min": 预估完整实现时间（分钟）,
+                "shortcut_time_min": 预估 shortcut 时间（分钟）,
+                "diff_min": 时间差,
+                "shortcut_chosen": 是否选择了 shortcut,
+                "shortcut_reason": 选择 shortcut 的原因（如有）,
+                "recommendation": "complete" | "shortcut",
+            }
+        """
+        scope_count = len(wu.scope_allow)
+        file_limit = 10  # 超过 10 文件认为成本较高
+
+        # 粗略估算：每文件 5-15 分钟，取决于复杂度
+        base_time = scope_count * 8  # 每文件 8 分钟基准
+        has_tests = "test" in wu.title.lower() or "test" in wu.target.lower()
+        test_time = 10 if has_tests else 5  # 测试额外时间
+
+        complete_time = base_time + test_time
+        shortcut_time = int(complete_time * 0.4)  # shortcut 约 40% 时间
+        diff = complete_time - shortcut_time
+
+        # Boil the Lake: 如果时间差 < 15 分钟，优先完整实现
+        threshold = 15  # time_threshold_minutes
+        shortcut_chosen = diff > threshold
+        recommendation = "shortcut" if shortcut_chosen else "complete"
+
+        return {
+            "complete_time_min": complete_time,
+            "shortcut_time_min": shortcut_time,
+            "diff_min": diff,
+            "shortcut_chosen": shortcut_chosen,
+            "shortcut_reason": f"预估时间差 {diff} 分钟，超过阈值 {threshold} 分钟" if shortcut_chosen else "",
+            "recommendation": recommendation,
+        }
