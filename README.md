@@ -183,6 +183,18 @@ DRAFT ──▶ READY ──▶ RUNNING ──▶ NEEDS_REVIEW ──▶ ACCEPTE
 - 所有转换记录 JSONL **审计日志**
 - 支持**强制覆盖**（管理员模式）
 
+### 核心子系统
+
+| 子系统 | 说明 |
+|--------|------|
+| **WorkUnit Engine** | 状态机驱动的工作单元执行引擎 |
+| **Taste Memory** | AI 偏好记忆系统，记住用户风格和偏好 |
+| **Prompt Injection Guard** | 双层提示词注入防护（语义级 + 规则级） |
+| **Knowledge Graph** | 代码依赖关系图谱 (graphify 集成) |
+| **Browser Health Monitor** | 浏览器健康监控与自动重启 |
+| **Canary Token** | 数据泄露检测令牌 |
+| **Analysis Pipeline** | 分析管道编排 (`/api/ralph/projects/pipeline`) |
+
 ### 9 个 AI 角色
 
 | 角色 | 职责 | 并发上限 |
@@ -218,8 +230,9 @@ DRAFT ──▶ READY ──▶ RUNNING ──▶ NEEDS_REVIEW ──▶ ACCEPTE
 | | `/ralph/prd` | PRD 文档管理 |
 | | `/ralph/specs` | 规格文档 |
 | | `/ralph/contracts` | 接口合同 |
-| **系统** | `/ralph/graph` | 依赖关系 DAG |
+| **系统** | `/ralph/graph` | 依赖关系 DAG (graphify) |
 | | `/ralph/memory` | 记忆系统状态 |
+| | `/ralph/tastes` | 偏好记忆管理 |
 | | `/ralph/settings/*` | 配置中心（Provider、工具链、Issue 策略、Agent） |
 
 ### Dashboard 后端 API
@@ -249,12 +262,12 @@ DRAFT ──▶ READY ──▶ RUNNING ──▶ NEEDS_REVIEW ──▶ ACCEPTE
 ## 🧪 测试
 
 ```
-后端 Python:  94 passed,  0 failed  (pytest)
-前端 Vitest: 374 passed,  1 failed  (Vitest)  
-前端 E2E:     80 passed, 18 failed  (Playwright)
+前端单元测试:  291 passed, 12 failed  (Vitest, 303 total)
+前端 E2E:      6 spec files            (Playwright)
+后端集成测试:  待接入
 ```
 
-> 🚧 测试覆盖率工具正在接入中。
+> 🚧 前端部分组件测试存在 12 个失败（React 19 渲染上下文相关），后端 Python 测试尚未接入。
 
 ---
 
@@ -287,23 +300,33 @@ codeforge/
 ├── core/                  # 核心引擎
 │   ├── project_manager.py # 项目管理器
 │   ├── feature_tracker.py # 功能追踪
-│   ├── task_queue.py      # 任务队列
 │   └── execution_ledger.py# 执行台账
 ├── ralph/                 # Ralph 编排引擎
-│   ├── repository.py      # 持久化层
+│   ├── repository.py      # 统一状态仓库 (JSONL)
 │   ├── state_machine.py   # 状态机
 │   ├── brainstorm_manager.py # 需求探索
-│   └── command_handler.py # 命令处理
+│   ├── command_handler.py # 命令处理
+│   └── work_unit_engine.py # 工作单元引擎
 ├── dashboard/             # FastAPI 后端
 │   ├── api/routes.py      # REST + WebSocket
 │   ├── coordinator.py     # PM 协同器
 │   ├── consumer.py        # 命令消费者
 │   └── state_repository.py# 状态仓库
 ├── dashboard-ui/          # Next.js 前端
-│   ├── app/ralph/         # 23 个路由页面
+│   ├── app/ralph/         # 23+ 路由页面
 │   ├── lib/               # Store + API + WebSocket
 │   └── components/        # UI 组件
-└── tests/                 # 测试
+├── .ralph/                # 项目运行时数据
+│   ├── work_units/        # WorkUnit 持久化
+│   ├── features/          # 特性追踪
+│   ├── memory/            # 记忆系统
+│   ├── knowledge-graph/   # 知识图谱
+│   └── config/            # 配置中心
+├── tests/                 # 测试
+│   ├── ralph/             # Python 单元测试
+│   ├── *.test.tsx         # 前端组件测试
+│   └── e2e/               # Playwright E2E
+└── docs/                  # 架构文档 & 设计决策
 ```
 
 ---
