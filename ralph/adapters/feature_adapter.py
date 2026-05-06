@@ -29,7 +29,6 @@ _FEATURE_STATUS_MAP: dict[FeatureStatus, WorkUnitStatus] = {
     FeatureStatus.REVIEW: WorkUnitStatus.NEEDS_REVIEW,
     FeatureStatus.DONE: WorkUnitStatus.ACCEPTED,
     FeatureStatus.BLOCKED: WorkUnitStatus.BLOCKED,
-    FeatureStatus.FAILED: WorkUnitStatus.FAILED,
 }
 
 # WorkUnitStatus → Feature.status 反向映射

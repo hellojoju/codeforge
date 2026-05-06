@@ -89,7 +89,7 @@ class WorkUnitEngine:
             # 索引到知识图谱
             if self._knowledge_graph is not None:
                 try:
-                    self._knowledge_graph.index_work_unit(unit_dict, exec_log=exec_log)
+                    self._knowledge_graph.index_work_unit(unit_dict, files=[])
                 except Exception as e:
                     logger.warning("KnowledgeGraph index failed for %s: %s", work_id, e)
             # 触发反思回顾

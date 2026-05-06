@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
 from pathlib import Path
 from typing import Any
+
+from ralph.graphify_core.extractor import extract_ast_graph
+from ralph.graphify_core.query import GraphQueryEngine
 
 logger = logging.getLogger(__name__)
 
@@ -134,129 +136,24 @@ class GraphifyService:
         project_path: Path,
         changed_files: list[str] | None = None,
     ) -> dict[str, Any] | None:
-        """尝试通过 graphify MCP skill 提取依赖图。"""
+        """通过 graphify_core 提取依赖图（本地调用，无外部依赖）。"""
         try:
-            # Check if Skill tool is available via subprocess approach
-            # Since we're in a library context, we use a file-based protocol
-            # Write a request file and check if graphify can process it
-            request_file = self._ralph_dir / "graphify_request.json"
-            request_data = {
-                "action": "extract",
-                "project_path": str(project_path),
-                "changed_files": changed_files,
-            }
-            request_file.write_text(json.dumps(request_data), encoding="utf-8")
-
-            # Try importing graphify module directly if available
-            spec = importlib.util.find_spec("graphify")
-            if spec is not None:
-                module = importlib.import_module("graphify")
-                if hasattr(module, "extract"):
-                    result = module.extract(str(project_path))
-                    return result
+            graph = extract_ast_graph(project_path, changed_files=changed_files)
+            cache_file = self._graph_cache / "ast_graph.json"
+            cache_file.write_text(
+                json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            return graph
         except Exception as e:
-            logger.debug("graphify MCP not available, falling back: %s", e)
+            logger.debug("graphify_core extraction failed: %s", e)
         return None
 
-    def _extract_fallback(
-        self,
-        project_path: Path,
-        changed_files: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """回退方案：基于文件扫描的依赖图提取。"""
-        nodes: list[dict[str, Any]] = []
-        edges: list[dict[str, Any]] = []
-        seen: set[str] = set()
-
-        # Determine which files to scan
-        if changed_files:
-            files_to_scan = [project_path / f for f in changed_files if (project_path / f).exists()]
-        else:
-            files_to_scan = list(project_path.rglob("*.py"))
-            files_to_scan = [f for f in files_to_scan if "node_modules" not in str(f) and ".git" not in str(f)]
-
-        for file_path in files_to_scan[:200]:  # Limit to avoid excessive processing
-            rel_path = str(file_path.relative_to(project_path))
-            if rel_path in seen:
-                continue
-            seen.add(rel_path)
-
-            nodes.append({
-                "id": rel_path,
-                "label": file_path.stem,
-                "type": "file",
-                "module": rel_path.replace("/", ".").removesuffix(".py"),
-                "risk_score": self._estimate_file_risk(file_path),
-            })
-
-            # Extract import dependencies
-            try:
-                content = file_path.read_text(encoding="utf-8")
-                imports = self._extract_imports(content)
-                for imp in imports:
-                    # Map import to local file if possible
-                    target_file = self._resolve_import(project_path, imp, file_path)
-                    if target_file and target_file != rel_path:
-                        edges.append({
-                            "source": rel_path,
-                            "target": target_file,
-                            "type": "imports",
-                        })
-            except (OSError, UnicodeDecodeError):
-                continue
-
-        # Save cache
+    def query(self, question: str, mode: str = "bfs", budget: int = 1500) -> dict:
+        """查询代码知识图谱。"""
         cache_file = self._graph_cache / "ast_graph.json"
-        cache_file.write_text(json.dumps({"nodes": nodes, "edges": edges}, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        return {"nodes": nodes, "edges": edges}
-
-    def _extract_imports(self, content: str) -> list[str]:
-        """提取 Python import 语句中的模块名。"""
-        imports = []
-        for line in content.split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("from ") and " import " in stripped:
-                module = stripped.split(" ", 2)[1]
-                if module.startswith("."):
-                    continue  # Skip relative imports
-                imports.append(module)
-            elif stripped.startswith("import "):
-                parts = stripped[7:].split(",")
-                for part in parts:
-                    module = part.strip().split(" as ")[0].strip()
-                    if not module.startswith("."):
-                        imports.append(module)
-        return imports
-
-    def _resolve_import(self, project_path: Path, module: str, source_file: Path) -> str | None:
-        """将模块名解析为相对文件路径。"""
-        # Try direct path match: module.path -> module/path.py
-        candidate = project_path / module.replace(".", "/")
-        if candidate.with_suffix(".py").exists():
-            return str(candidate.with_suffix(".py").relative_to(project_path))
-        if (candidate / "__init__.py").exists():
-            return str((candidate / "__init__.py").relative_to(project_path))
-
-        # Try from source file's directory
-        source_dir = source_file.parent
-        parts = module.split(".")
-        candidate2 = source_dir / "/".join(parts)
-        if candidate2.with_suffix(".py").exists():
-            return str(candidate2.with_suffix(".py").relative_to(project_path))
-
-        return None
-
-    def _estimate_file_risk(self, file_path: Path) -> float:
-        """估算文件风险分数（基于大小和复杂度）。"""
-        try:
-            content = file_path.read_text(encoding="utf-8")
-            lines = content.count("\n")
-            # Simple risk: more lines = higher risk
-            risk = min(lines / 500.0, 1.0)
-            # Increase risk for files with many imports
-            import_count = content.count("import ")
-            risk += min(import_count / 20.0, 0.5)
-            return round(min(risk, 1.0), 2)
-        except (OSError, UnicodeDecodeError):
-            return 0.0
+        if cache_file.is_file():
+            graph = json.loads(cache_file.read_text(encoding="utf-8"))
+        else:
+            return {"found": False, "error": "no cached graph, run extract first"}
+        engine = GraphQueryEngine(graph)
+        return engine.query_graph(question, mode=mode, budget=budget)

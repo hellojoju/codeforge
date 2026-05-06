@@ -195,19 +195,15 @@ class MemoryManager:
 
         summary = f"WorkUnit {feature_id} 状态: {work_unit.get('status', 'unknown')}"
         record = RetroRecord(
-            feature_id=feature_id,
             retro_id=f"retro-{feature_id}",
+            work_id=feature_id,
             summary=summary,
             lessons=[
                 Lesson(
-                    lesson_id=f"retro-{feature_id}-l1",
                     category="optimization",
                     content=improvements[0],
                 )
             ],
-            what_went_well=["执行链路已形成闭环"],
-            what_went_wrong=[work_unit.get("error", "")] if work_unit.get("error") else [],
-            improvements=improvements,
         )
         self._repo.save_retro(record)
         return {

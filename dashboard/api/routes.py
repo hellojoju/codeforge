@@ -159,6 +159,121 @@ async def lifespan(app: FastAPI):
             await task
 
 
+
+
+def _write_pyproject(project_path: Path, name: str) -> None:
+    """创建 pyproject.toml 模板。"""
+    content = f'''[project]
+name = "{name}"
+version = "0.1.0"
+description = ""
+requires-python = ">=3.12"
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "ruff"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+'''
+    (project_path / "pyproject.toml").write_text(content, encoding="utf-8")
+
+
+def _write_package_json(project_path: Path, name: str) -> None:
+    """创建 package.json 模板。"""
+    import json
+    data = {
+        "name": name,
+        "version": "0.1.0",
+        "private": True,
+        "scripts": {
+            "dev": "next dev",
+            "build": "next build",
+            "start": "next start",
+            "lint": "next lint",
+            "test": "jest",
+        },
+    }
+    (project_path / "package.json").write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
+def _write_gitignore(path: Path) -> None:
+    """创建 .gitignore。"""
+    content = """# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Node
+node_modules/
+.next/
+.nuxt/
+.output/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Ralph runtime data (managed externally at ~/.ralph/)
+.ralph/
+
+# State files
+data/tasks.db
+data/execution-plan.json
+
+# Test results
+coverage/
+.coverage
+test-results/
+playwright-report/
+"""
+    path.write_text(content, encoding="utf-8")
+
+
+def _write_claude_md(path: Path, name: str) -> None:
+    """创建 CLAUDE.md 项目指令模板。"""
+    content = f"""# {name}
+
+## 项目简介
+<!-- 在此填写项目定位 -->
+
+## 技术栈
+<!-- 编程语言、框架、数据库 -->
+
+## 编码规范
+- 遵循 PEP 8 / ESLint 规范
+- 所有函数必须有类型注解
+- 测试覆盖率 >= 80%
+
+## 工作流程
+- 修改前先读相关文件，理解现有代码
+- 修改后运行测试确保不破坏已有功能
+- 不修改和当前任务无关的代码
+- 有疑问时优先查文档
+"""
+    path.write_text(content, encoding="utf-8")
 def create_dashboard_app(
     event_bus: EventBus,
     repository: ProjectStateRepository | None = None,
@@ -1494,121 +1609,6 @@ def create_dashboard_app(
             "ralph_dir": str(ralph_dir),
             "dirs_created": dirs_to_create,
         }
-
-
-def _write_pyproject(project_path: Path, name: str) -> None:
-    """创建 pyproject.toml 模板。"""
-    content = f'''[project]
-name = "{name}"
-version = "0.1.0"
-description = ""
-requires-python = ">=3.12"
-
-[project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "ruff"]
-
-[tool.ruff]
-target-version = "py312"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-'''
-    (project_path / "pyproject.toml").write_text(content, encoding="utf-8")
-
-
-def _write_package_json(project_path: Path, name: str) -> None:
-    """创建 package.json 模板。"""
-    import json
-    data = {
-        "name": name,
-        "version": "0.1.0",
-        "private": True,
-        "scripts": {
-            "dev": "next dev",
-            "build": "next build",
-            "start": "next start",
-            "lint": "next lint",
-            "test": "jest",
-        },
-    }
-    (project_path / "package.json").write_text(
-        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-
-
-def _write_gitignore(path: Path) -> None:
-    """创建 .gitignore。"""
-    content = """# Python
-__pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
-.mypy_cache/
-*.egg-info/
-dist/
-build/
-.eggs/
-
-# Node
-node_modules/
-.next/
-.nuxt/
-.output/
-dist/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Environment
-.env
-.env.local
-.env.*.local
-
-# Ralph runtime data (managed externally at ~/.ralph/)
-.ralph/
-
-# State files
-data/tasks.db
-data/execution-plan.json
-
-# Test results
-coverage/
-.coverage
-test-results/
-playwright-report/
-"""
-    path.write_text(content, encoding="utf-8")
-
-
-def _write_claude_md(path: Path, name: str) -> None:
-    """创建 CLAUDE.md 项目指令模板。"""
-    content = f"""# {name}
-
-## 项目简介
-<!-- 在此填写项目定位 -->
-
-## 技术栈
-<!-- 编程语言、框架、数据库 -->
-
-## 编码规范
-- 遵循 PEP 8 / ESLint 规范
-- 所有函数必须有类型注解
-- 测试覆盖率 >= 80%
-
-## 工作流程
-- 修改前先读相关文件，理解现有代码
-- 修改后运行测试确保不破坏已有功能
-- 不修改和当前任务无关的代码
-- 有疑问时优先查文档
-"""
-    path.write_text(content, encoding="utf-8")
 
     # --- Ralph API: 项目管理端点 ---
 
