@@ -1,6 +1,5 @@
 'use client'
 
-import { useState } from 'react'
 import { AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -8,8 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { useDashboardStore } from '@/lib/store'
-import { resolveBlockingIssue } from '@/lib/api'
+import { useBlockingIssues, useResolveBlockingIssue } from '@/lib/hooks/useDashboardQueries'
 
 const ISSUE_LABELS: Record<string, string> = {
   missing_env: '缺少环境变量',
@@ -21,21 +19,16 @@ const ISSUE_LABELS: Record<string, string> = {
 }
 
 export function BlockingIssuesPanel() {
-  const blockingIssues = useDashboardStore((state) => state.blockingIssues)
-  const fetchBlockingIssues = useDashboardStore((state) => state.fetchBlockingIssues)
-  const [resolving, setResolving] = useState<Record<string, boolean>>({})
+  const { data: blockingIssues = [] } = useBlockingIssues()
+  const resolveMutation = useResolveBlockingIssue()
   const openIssues = blockingIssues.filter((issue) => !issue.resolved)
 
   const handleResolve = async (issueId: string) => {
-    setResolving((prev) => ({ ...prev, [issueId]: true }))
     try {
-      await resolveBlockingIssue(issueId, '人工确认已处理')
+      await resolveMutation.mutateAsync({ issueId, resolution: '人工确认已处理' })
       toast.success(`阻塞问题 ${issueId} 已标记为已解决`)
-      fetchBlockingIssues()
     } catch (e) {
       toast.error(`处理失败: ${e instanceof Error ? e.message : '未知错误'}`)
-    } finally {
-      setResolving((prev) => ({ ...prev, [issueId]: false }))
     }
   }
 
@@ -83,9 +76,9 @@ export function BlockingIssuesPanel() {
                         size="sm"
                         className="h-7 text-xs"
                         onClick={() => handleResolve(issue.issue_id)}
-                        disabled={resolving[issue.issue_id]}
+                        disabled={resolveMutation.isPending}
                       >
-                        {resolving[issue.issue_id] ? (
+                        {resolveMutation.isPending ? (
                           <Loader2 className="h-3 w-3 mr-1 animate-spin" />
                         ) : null}
                         标记已解决

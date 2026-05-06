@@ -48,18 +48,15 @@
 | 主要语言 | Python 3.11+ | 无独立后端（全栈 Next.js） | Go 1.24+ |
 | API / 服务框架 | FastAPI + Uvicorn | Next.js Route Handlers | Chi router |
 | 核心执行引擎 | Python 编排 + Claude CLI | Claude Code CLI | Go server + daemon + 多种 Agent CLI |
-| 任务持久化 | SQLite `TaskQueue` + `features.json` + `state.json` | `task.json` 文件 | PostgreSQL + sqlc + task/run 表 |
+| 任务持久化 | `ProjectStateRepository`（统一状态源） | `task.json` 文件 | PostgreSQL + sqlc + task/run 表 |
 | 状态存储风格 | 文件 + SQLite 混合 | 文件驱动 | 数据库优先 |
 | 实时通信 | FastAPI WebSocket + EventBus | 无 | WebSocket + 事件总线 |
 | 调度方式 | PM / Coordinator 进程内调度 | Shell 外循环轮询 | daemon 长驻调度 |
 
-**代码层面的真实情况**：
+**代码层面的真实情况**（已统一状态源）：
 
-- 我们的任务队列不是“纯内存”，而是 SQLite，见 [core/task_queue.py](/Users/jieson/auto-coding/core/task_queue.py)。
-- 我们的 feature 状态和 dashboard 状态不是同一个源：
-  - feature 在 [core/feature_tracker.py](/Users/jieson/auto-coding/core/feature_tracker.py) 的 `features.json`
-  - dashboard 在 [dashboard/state_repository.py](/Users/jieson/auto-coding/dashboard/state_repository.py) 的 `state.json`
-- 也就是说，我们现在已经不是“没有持久化”，而是“持久化分散、状态源不统一”。
+- 所有业务状态统一通过 `ProjectStateRepository`（`data/dashboard/state.json`）管理，不再有 features.json / state.json 双源。
+- Feature 状态机由 `FeatureTracker` 提供只读排序视图，写入唯一来源是 `ProjectStateRepository`。
 
 ### 3.2 前端
 
@@ -181,7 +178,7 @@
 
 **结论**
 
-- 我们下一步不应该简单理解成“给 TaskQueue 换数据库”。
+- 我们已统一项目状态源，通过 `ProjectStateRepository` 替代了原有的 TaskQueue / features.json / state.json 多源并存。
 - 更准确的目标是：**统一项目状态源，减少同一事实在 SQLite / JSON / 内存中的重复表达。**
 
 ### 4.4 事件模型与副作用收口
@@ -366,7 +363,7 @@
 
 | 内容 | 来源 | 原因 |
 |------|------|------|
-| `task.json` 原样替代我们全部任务系统 | auto-coding-agent-demo | 我们已有 FeatureTracker、TaskQueue、Repository，直接替换会把平台能力降回单文件工作流。应该借“规约”，不是机械替换。 |
+| `task.json` 原样替代我们全部任务系统 | auto-coding-agent-demo | 我们已有 FeatureTracker、Repository 统一状态，直接替换会把平台能力降回单文件工作流。应该借”规约”，不是机械替换。 |
 | Shell + grep 作为长期核心编排 | auto-coding-agent-demo | 对单项目有效，但不适合作为平台主控制面。 |
 | Go 后端重写 | multica | 当前瓶颈不在语言性能，而在状态治理和模块边界。 |
 | 一上来就做 Electron + 多租户 + daemon 全套 | multica | 这是产品成熟期能力，不是当前最短路径。 |

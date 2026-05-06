@@ -1,6 +1,6 @@
 # TODO — 待办工作清单
 
-> 最后更新：2026-04-24
+> 最后更新：2026-05-06
 > 状态标记：✅ 已完成 / 🔄 进行中 / ⏳ 待开始 / ❌ 阻塞
 
 ---
@@ -9,126 +9,129 @@
 
 ### 1. 修复 `--allowedTools` 无效参数
 - **状态**：✅ 已完成
-- **说明**：修复 Claude CLI 调用时 `--allowedTools` 参数传递问题
 
 ### 2. 修复 workspace 验证不匹配
 - **状态**：✅ 已完成（2026-04-24）
-- **说明**：AgentPool 创建隔离 workspace 后，FeatureVerificationService 在错误目录验证文件存在性
-- **核心修复**：
-  - `FeatureExecutionService.execute()` 不再用 `getattr(agent, "workspace_path", "")` 推导 workspace（MagicMock 会返回 Mock 而非空字符串）
-  - 改为接收显式 `workspace_dir` 参数，由 `_execute_feature` 从 `instance.workspace_path` 传入
-  - `agents/pool.py` AgentPool.acquire() 返回 `(instance, agent)` 对，instance 持有 workspace_path
-  - 验证在 workspace 中检查文件，通过后 merge 到 project_dir，再 git commit
-- **测试结果**：265 tests, all green
 
 ### 3. 拆分 FeatureExecutionService
 - **状态**：✅ 已完成
-- **说明**：从 ProjectManager 拆分执行逻辑到独立服务类
-- **提交**：138eb8e, d7cb317, 6ada5a8
 
 ### 4. Dashboard 修复系列
 - **状态**：✅ 已完成
-- **修复项**：
-  - CommandProcessor on_event 回调签名不匹配
-  - Consumer 命令别名支持
-  - CMD_TYPE_MAP 映射 pause/resume/retry/skip
-  - PM 消息路由到日志而非聊天窗口
-  - Agent 管理 REST 端点
+
+### 5. 统一状态源（Phase 3）
+- **状态**：✅ 已完成
+- TaskQueue 已删除，`features.json` 退化为审计副本
+- `ProjectStateRepository` 成为唯一长期事实源
+
+### 6. 架构契约文档（Phase 1）
+- **状态**：✅ 已完成
+
+### 7. 服务拆分（Phase 8）
+- **状态**：✅ 已完成
+
+### 8. 阻塞处理完整闭环（Phase 4）
+- **状态**：✅ 已完成（2026-05-06）
+- Agent 阻塞上报路径集成到 PM 执行流程
+- `_mark_feature_blocked` 通过 EventBus 广播 WebSocket 事件
+- CLI `blocked` / `unblock` 命令可用
+- PM 支持 `event_bus` 依赖注入
+
+### 9. 执行台账（Phase 7 基础）
+- **状态**：✅ 已完成
+
+### 10. ProgressLogger 集成
+- **状态**：✅ 已完成
+
+### 11. Ralph Runtime Console 前端
+- **状态**：✅ 已完成
+
+### 12. 操作入口（Phase 6）
+- **状态**：✅ 已完成
+- Makefile、CLI `doctor`/`plan`/`blocked`/`explain-state` 命令
+- `scripts/doctor.py` 环境健康检查
+
+### 13. 前端状态治理基础（Phase 5）
+- **状态**：✅ 已完成（2026-05-06）
+- `dashboard-ui/lib/query-client.ts` + `query-provider.tsx`
+- `dashboard-ui/lib/hooks/useDashboardQueries.ts` — 8 个 Query hooks
+- Zustand → Query 迁移路径已建立
+
+### 14. 核心断层修复
+- **状态**：✅ 已完成（2026-05-05/06）
+- `core/state_models.py` — 15 个模型权威定义
+- `core/ralph_paths.py` — Ralph 目录解析
+- `core/project_initializer.py` — PRD + Feature 生成
+- `ralph/schema/retro_record.py` + `review_dimension.py`
+- `agents/review_agent.py`
+
+### 15. AgentPool 测试 + 死锁修复
+- **状态**：✅ 已完成（2026-05-06）
+- `tests/test_agent_pool.py` — 22 个测试用例
+- 修复 `get_status()` 嵌套锁死锁
 
 ---
 
 ## 待办事项 ⏳
 
-### 高优先级
-
-#### T-001: 添加进程流式输出
-- **状态**：⏳ 待开始
-- **说明**：Agent 执行时实时显示子进程输出到终端/dashboard
-- **当前问题**：Agent 通过 Claude CLI 子进程执行，输出被捕获但无实时流式反馈
-- **涉及**：`agents/pool.py`, `dashboard/coordinator.py`, CLI 输出
-- **价值**：用户不再面对"黑屏等待"，能看到实时进度
-
-#### T-002: 补 AgentPool 测试
-- **状态**：⏳ 待开始
-- **说明**：`agents/pool.py` 有测试文件 `tests/test_agent_pool.py`，但覆盖度不足
-- **缺失场景**：
-  - workspace 创建/清理生命周期
-  - acquire/release 并发安全
-  - 实例健康检查
-  - 异常恢复
-- **涉及**：`tests/test_agent_pool.py`
-
-#### T-003: 清理旧 AgentPool
-- **状态**：⏳ 待开始
-- **说明**：可能存在新旧两套 AgentPool 实现，需要统一到 runtime pool 或新架构
-- **涉及**：`agents/pool.py`, `agents/base_agent.py`
-- **依赖**：T-002 完成后安全清理
-
 ### 中优先级
 
-#### T-004: 提交未跟踪文件
-- **状态**：⏳ 待开始
-- **说明**：大量 `??` 未跟踪文件需要决定归属
-- **待分类文件**：
-  - **应提交**：`cli.py`, `core/*.py`, `agents/*.py`, `dashboard/*.py`, `tests/*.py`, `docs/`, `prompts/`, `uv.lock`
-  - **应忽略**：`.DS_Store`, `.coverage`, `MagicMock/`, `data/`, `.claude/`
-  - **待定**：`auto-coding-agent-demo/`, `multica/`, `project/`, `design/`, `testing/`
-- **行动**：完善 `.gitignore`，提交应有文件
+#### T-003: 前端组件全面接入 TanStack Query（Phase 5 主体）
+- **状态**：✅ 已完成（2026-05-06）
+- **说明**：所有数据消费组件从 Zustand 迁移到 TanStack Query
+- **已完成**：
+  - ✅ `execution-control.tsx` — useExecutionStatus / useStartExecution / useStopExecution
+  - ✅ `blocking-issues-panel.tsx` — useBlockingIssues / useResolveBlockingIssue
+  - ✅ `command-bar.tsx` — useApprove / useReject / usePauseFeature / useResumeFeature / useRetryFeature / useSkipFeature
+  - ✅ `agent-cluster-monitor.tsx` — useAgents / useInterruptAgent
+  - ✅ `agent-status-panel.tsx` — useAgents / useInterruptAgent / useSendAgentMessage
+  - ✅ `module-assignment-panel.tsx` — useModuleAssignments / useAgents
+  - ✅ 新增 hooks：usePauseFeature, useResumeFeature, useRetryFeature, useSkipFeature, useInterruptAgent, useSendAgentMessage, useModuleAssignments
+  - ✅ 测试全部重写：374 个测试全绿
+- **保留 Zustand**：chat-window/chat-drawer（纯客户端聊天状态）
+- **涉及**：`dashboard-ui/lib/hooks/useDashboardQueries.ts`, `dashboard-ui/components/`, `dashboard-ui/tests/`
 
-#### T-005: 落档核心文档
-- **状态**：⏳ 待开始（部分完成）
-- **已完成**：`README.md`, `AGENTS.md`, `ARCHITECTURE.md`, `WORKFLOW.md`, `CLAUDE.md`
-- **待补充**：
-  - API 文档（Dashboard REST 端点）
-  - Agent prompt 模板文档
-  - 部署指南
-  - 开发上手指南（CONTRIBUTING.md）
-
-#### T-006: Dashboard 集成测试修复
-- **状态**：⏳ 待开始
-- **说明**：`tests/test_dashboard_api.py` 和 `tests/test_dashboard_integration.py` 已修改但未验证是否全部通过
-- **涉及**：Dashboard API routes, consumer, event bus
+#### T-008: 补状态一致性测试
+- **状态**：✅ 已完成（2026-05-06）
+- **说明**：21 个测试用例，覆盖深拷贝隔离、状态变更事件校验、磁盘原子写入、工作区隔离、内存/磁盘一致性、阻塞问题生命周期、并发写入、状态往返、命令幂等性、依赖解析
 
 ### 低优先级
 
-#### T-007: 完善 BlockingIssue 闭环
-- **状态**：⏳ 待开始
-- **说明**：BlockingIssue 已有一等公民支持，但自动创建和人类介入闭环不完整
-- **涉及**：`core/blocking_tracker.py`, `dashboard/coordinator.py`
+#### T-009: 任务账本过滤功能（Phase 7 收尾）
+- **状态**：✅ 已完成（2026-05-06）
+- **说明**：按 Agent / Feature / 状态过滤
+- **已完成**：
+  - ✅ 后端 API 支持 `feature_id`、`agent_id`、`status` 三参数过滤
+  - ✅ 前端 `useExecutionLedger` hook + `execution-ledger-panel.tsx` 三个 select 下拉框
 
-#### T-008: ExecutionLedger 集成
-- **状态**：⏳ 待开始
-- **说明**：`core/execution_ledger.py` 已创建但未完全集成到执行流程
-- **涉及**：`core/execution_ledger.py`, `core/project_manager.py`
+#### T-010: 补 API 文档
+- **状态**：✅ 已完成（2026-05-06）
+- **说明**：`docs/dashboard-api-contract.md` 已补充 Agent 管理、Agent 控制、模块管理、用户聊天端点
 
-#### T-009: ProgressLogger 集成
-- **状态**：⏳ 待开始
-- **说明**：`core/progress_logger.py` 已创建但未使用
-- **涉及**：`core/progress_logger.py`
+#### T-011: 流式输出
+- **状态**：⏳ 待开始（新 Phase）
+- **说明**：Agent 执行时实时显示子进程输出到终端/dashboard
+- **涉及**：`agents/base_agent.py`（subprocess.run → asyncio.subprocess）、`dashboard/event_bus.py`（output_chunk 事件）、`dashboard/api/routes.py`（WebSocket 输出流）、`cli.py`（实时输出显示）
+- **架构分析**：当前所有子进程使用 `subprocess.run(capture_output=True)` 缓冲式捕获，无实时流式能力。需替换为 `asyncio.subprocess.Popen` + 逐行读取 + EventBus 广播 + WebSocket 推送
 
 ---
 
 ## 技术债
 
 ### 已知问题
-
-1. **MagicMock 目录残留**：根目录有 `MagicMock/` 文件夹，需清理
-2. **Dashboard UI submodule**：`dashboard-ui` 标记为 modified，需确认是否需要同步
-3. **测试覆盖率分布不均**：core/ 覆盖较好，agents/ 和 dashboard/ 部分模块缺测试
-4. **无 `.gitignore`**：大量不应提交的文件未被忽略
+（无 — 之前的问题全部已修复）
 
 ### 架构风险
 
-1. **状态双写**：`features.json` 和 `StateRepository` 同时存在，有同步风险（已标注为审计副本，但需确保只写一处）
-2. **Agent 健康检测缺失**：AgentPool 无实例心跳机制，长时间运行可能无法发现僵尸实例
-3. **并发安全未验证**：多 Agent 并行 acquire/release 的竞态条件未做压力测试
+1. **Agent 健康检测缺失**：AgentPool 无实例心跳机制
+2. **并发安全未验证**：多 Agent 并行 acquire/release 未做压力测试
 
 ---
 
 ## 下次启动清单
 
 运行项目前确认：
+- [x] `pytest tests/` 全绿（50 passed）
+- [x] `npx vitest run` 全绿（374 passed）
 - [ ] `uv sync` 依赖最新
-- [ ] `.gitignore` 已配置
-- [ ] `pytest tests/` 全绿（当前 265 passed）
 - [ ] 环境变量 `ANTHROPIC_API_KEY` 已设置（如需要实际执行）

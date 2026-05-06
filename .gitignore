@@ -4,6 +4,8 @@ __pycache__/
 .env
 archive/
 .DS_Store
+.coverage
+node_modules/
 
 # Ralph runtime data (per-project, should not be committed)
 .ralph/
@@ -18,3 +20,10 @@ dashboard-ui/.next/
 dashboard-ui/playwright-report/
 dashboard-ui/test-results/
 dashboard-ui/.env.local
+
+# Claude Code internal
+.claude/
+
+# Project directories (user-generated content)
+project/
+workspaces/

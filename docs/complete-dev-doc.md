@@ -46,8 +46,8 @@
 ├─────────────────────────────────────────────────┤
 │              ProjectManager (PM)                 │
 │  ┌─────────┐  ┌──────────────┐  ┌────────────┐ │
-│  │ Feature  │  │  TaskQueue   │  │  Progress  │ │
-│  │ Tracker  │  │              │  │  Logger    │ │
+│  │ Feature  │  │  State       │  │  Progress  │ │
+│  │ Tracker  │  │  Repository  │  │  Logger    │ │
 │  └─────────┘  └──────────────┘  └────────────┘ │
 ├─────────────────────────────────────────────────┤
 │                   Agents Layer                   │
@@ -70,7 +70,6 @@
 |------|------|------|
 | ProjectManager | `core/project_manager.py` | 总调度器：初始化、执行循环、验收 |
 | FeatureTracker | `core/feature_tracker.py` | Feature 状态机（pending→in_progress→review→done/blocked） |
-| TaskQueue | `core/task_queue.py` | 任务队列管理 |
 | ProgressLogger | `core/progress_logger.py` | 进度日志持久化 |
 | BaseAgent | `agents/base_agent.py` | Agent 基类，封装 claude CLI 调用 |
 | E2ERunner | `testing/e2e_runner.py` | 端到端测试执行器 |

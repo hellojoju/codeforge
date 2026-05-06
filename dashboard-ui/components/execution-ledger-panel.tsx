@@ -1,29 +1,24 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { fetchExecutionLedger } from '@/lib/api'
-import type { ExecutionLedger } from '@/lib/types'
-import { LEDGER_STATUS_LABELS, LEDGER_STATUS_COLORS } from '@/lib/types'
+import { useMemo, useState } from 'react'
+import { useExecutionLedger } from '@/lib/hooks/useDashboardQueries'
+import { LEDGER_STATUS_LABELS, type LedgerEntryStatus } from '@/lib/types'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
 export function ExecutionLedgerPanel() {
-  const [ledger, setLedger] = useState<ExecutionLedger | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [featureId, setFeatureId] = useState('')
+  const [agentId, setAgentId] = useState('')
+  const [status, setStatus] = useState<LedgerEntryStatus | ''>('')
+  const { data: ledger, isLoading, error } = useExecutionLedger({
+    featureId: featureId || undefined,
+    agentId: agentId || undefined,
+    status: status || undefined,
+  })
 
-  useEffect(() => {
-    setLoading(true)
-    setError(null)
-    fetchExecutionLedger()
-      .then(setLedger)
-      .catch((e) => setError(e instanceof Error ? e.message : '加载失败'))
-      .finally(() => setLoading(false))
-  }, [])
-
-  if (loading) {
+  if (isLoading) {
     return (
       <Card>
         <CardHeader className="py-3">
@@ -40,7 +35,9 @@ export function ExecutionLedgerPanel() {
         <CardHeader className="py-3">
           <CardTitle className="text-sm">执行台账</CardTitle>
         </CardHeader>
-        <CardContent className="px-4 pb-4 text-sm text-red-500">{error}</CardContent>
+        <CardContent className="px-4 pb-4 text-sm text-red-500">
+          {error instanceof Error ? error.message : '加载失败'}
+        </CardContent>
       </Card>
     )
   }
@@ -57,12 +54,61 @@ export function ExecutionLedgerPanel() {
       ]
     : []
 
+  const executions = ledger?.executions ?? []
+  const featureOptions = useMemo(
+    () => Array.from(new Set(executions.map((e) => e.feature_id).filter(Boolean))).sort(),
+    [executions],
+  )
+  const agentOptions = useMemo(
+    () => Array.from(new Set(executions.map((e) => e.agent_id).filter(Boolean))).sort(),
+    [executions],
+  )
+
   return (
     <Card>
       <CardHeader className="py-3">
         <CardTitle className="text-sm">执行台账</CardTitle>
       </CardHeader>
       <CardContent className="p-0">
+        <div className="grid grid-cols-3 gap-2 px-4 pb-3">
+          <select
+            value={featureId}
+            onChange={(e) => setFeatureId(e.target.value)}
+            className="h-8 rounded border px-2 text-xs"
+          >
+            <option value="">全部 Feature</option>
+            {featureOptions.map((id) => (
+              <option key={id} value={id}>
+                {id}
+              </option>
+            ))}
+          </select>
+          <select
+            value={agentId}
+            onChange={(e) => setAgentId(e.target.value)}
+            className="h-8 rounded border px-2 text-xs"
+          >
+            <option value="">全部 Agent</option>
+            {agentOptions.map((id) => (
+              <option key={id} value={id}>
+                {id}
+              </option>
+            ))}
+          </select>
+          <select
+            value={status}
+            onChange={(e) => setStatus(e.target.value as LedgerEntryStatus | '')}
+            className="h-8 rounded border px-2 text-xs"
+          >
+            <option value="">全部状态</option>
+            <option value="started">已启动</option>
+            <option value="completed">已完成</option>
+            <option value="failed">失败</option>
+            <option value="retrying">重试中</option>
+            <option value="blocked">已阻塞</option>
+          </select>
+        </div>
+
         {/* Summary bar */}
         {summaryItems.length > 0 && (
           <div className="grid grid-cols-5 gap-2 px-4 pb-3">

@@ -2,17 +2,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { ModuleAssignmentPanel } from '@/components/module-assignment-panel'
-import { useDashboardStore } from '@/lib/store'
-
-vi.mock('@/lib/store', () => ({
-  useDashboardStore: vi.fn((selector?: (s: any) => any) => {
-    const state = {
-      moduleAssignments: [],
-      agents: [],
-    }
-    return selector ? selector(state) : state
-  }),
-}))
+import * as hooks from '@/lib/hooks/useDashboardQueries'
+import { renderWithQueryClient } from './test-utils'
 
 vi.mock('@/components/ui/badge', () => ({
   Badge: ({ children, variant, className }: { children: React.ReactNode; variant?: string; className?: string }) => (
@@ -23,15 +14,24 @@ vi.mock('@/components/ui/badge', () => ({
 describe('ModuleAssignmentPanel', () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    vi.spyOn(hooks, 'useModuleAssignments').mockReturnValue({
+      data: [],
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
+    vi.spyOn(hooks, 'useAgents').mockReturnValue({
+      data: { agents: [] },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
   })
 
   it('returns null when no assignments', () => {
-    vi.mocked(useDashboardStore).mockImplementation((selector?: (s: any) => any) => {
-      const state = { moduleAssignments: [], agents: [] }
-      return selector ? selector(state) : state
-    })
-
-    const { container } = render(<ModuleAssignmentPanel />)
+    const { container } = renderWithQueryClient(<ModuleAssignmentPanel />)
     expect(container.innerHTML).toBe('')
   })
 
@@ -59,12 +59,15 @@ describe('ModuleAssignmentPanel', () => {
       },
     ]
 
-    vi.mocked(useDashboardStore).mockImplementation((selector?: (s: any) => any) => {
-      const state = { moduleAssignments: assignments, agents: [] }
-      return selector ? selector(state) : state
-    })
+    vi.spyOn(hooks, 'useModuleAssignments').mockReturnValue({
+      data: assignments,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
 
-    render(<ModuleAssignmentPanel />)
+    renderWithQueryClient(<ModuleAssignmentPanel />)
     expect(screen.getByText('backend')).toBeInTheDocument()
     expect(screen.getByText('frontend')).toBeInTheDocument()
     expect(screen.getByText('auth-module')).toBeInTheDocument()
@@ -95,12 +98,15 @@ describe('ModuleAssignmentPanel', () => {
       },
     ]
 
-    vi.mocked(useDashboardStore).mockImplementation((selector?: (s: any) => any) => {
-      const state = { moduleAssignments: assignments, agents: [] }
-      return selector ? selector(state) : state
-    })
+    vi.spyOn(hooks, 'useModuleAssignments').mockReturnValue({
+      data: assignments,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
 
-    render(<ModuleAssignmentPanel />)
+    renderWithQueryClient(<ModuleAssignmentPanel />)
     expect(screen.getByText('已完成')).toBeInTheDocument()
     expect(screen.getByText('已阻塞')).toBeInTheDocument()
   })
@@ -119,12 +125,15 @@ describe('ModuleAssignmentPanel', () => {
       },
     ]
 
-    vi.mocked(useDashboardStore).mockImplementation((selector?: (s: any) => any) => {
-      const state = { moduleAssignments: assignments, agents: [] }
-      return selector ? selector(state) : state
-    })
+    vi.spyOn(hooks, 'useModuleAssignments').mockReturnValue({
+      data: assignments,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
 
-    render(<ModuleAssignmentPanel />)
+    renderWithQueryClient(<ModuleAssignmentPanel />)
     expect(screen.getByText('→ 未分配')).toBeInTheDocument()
   })
 
@@ -142,12 +151,15 @@ describe('ModuleAssignmentPanel', () => {
       },
     ]
 
-    vi.mocked(useDashboardStore).mockImplementation((selector?: (s: any) => any) => {
-      const state = { moduleAssignments: assignments, agents: [] }
-      return selector ? selector(state) : state
-    })
+    vi.spyOn(hooks, 'useModuleAssignments').mockReturnValue({
+      data: assignments,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
 
-    render(<ModuleAssignmentPanel />)
+    renderWithQueryClient(<ModuleAssignmentPanel />)
     expect(screen.getByText('database')).toBeInTheDocument()
     expect(screen.getByText('auth')).toBeInTheDocument()
   })
@@ -159,12 +171,15 @@ describe('ModuleAssignmentPanel', () => {
       { module_id: 'm3', module_name: 'D3', role: 'qa', status: 'pending', description: 'D3', dependencies: [], assigned_agent_id: '', interface_contract: {} },
     ]
 
-    vi.mocked(useDashboardStore).mockImplementation((selector?: (s: any) => any) => {
-      const state = { moduleAssignments: assignments, agents: [] }
-      return selector ? selector(state) : state
-    })
+    vi.spyOn(hooks, 'useModuleAssignments').mockReturnValue({
+      data: assignments,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
 
-    render(<ModuleAssignmentPanel />)
+    renderWithQueryClient(<ModuleAssignmentPanel />)
     expect(screen.getByText('qa')).toBeInTheDocument()
   })
 })

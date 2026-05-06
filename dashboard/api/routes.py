@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -16,19 +17,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from dashboard.api.feature_routes import router as feature_router
-
 if TYPE_CHECKING:
     from agents.product_manager import ProductManager
     from dashboard.coordinator import PMCoordinator
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from dashboard.command_processor import CommandProcessor
 from dashboard.consumer import CommandConsumer
 from dashboard.event_bus import EventBus
+from dashboard.api.ralph_extended_routes import register_ralph_extended_routes
 from core.state_models import ChatMessage, Command, Event, ModuleAssignment
 from dashboard.state_repository import ProjectStateRepository
 from ralph.command_handler import RalphCommandHandler
@@ -38,6 +38,45 @@ from ralph.repository import RalphRepository
 from ralph.schema.work_unit import WorkUnitStatus
 
 logger = logging.getLogger(__name__)
+
+OPTIONAL_CAPABILITIES: dict[str, str] = {
+    "project_analyzer": "ralph.project_analyzer",
+    "taste_memory": "ralph.taste_memory",
+    "memory_manager": "ralph.memory_manager",
+    "context_engine": "ralph.context_engine",
+    "pm_agent": "ralph.pm_agent",
+    "turn_engine": "ralph.turn_engine",
+    "knowledge_graph": "ralph.knowledge_graph",
+    "retrieval_pipeline": "ralph.retrieval_pipeline",
+    "pipeline": "ralph.pipeline",
+    "graphify_service": "ralph.graphify_service",
+    "issue_command_parser": "ralph.issue_command_parser",
+    "issue_sync_protocol": "ralph.issue_sync_protocol",
+    "ship_service": "ralph.ship_service",
+    "recovery": "ralph.recovery",
+}
+
+
+def _module_available(module_name: str) -> bool:
+    return importlib.util.find_spec(module_name) is not None
+
+
+def _build_capabilities() -> dict[str, dict[str, Any]]:
+    return {
+        name: {"module": module_name, "available": _module_available(module_name)}
+        for name, module_name in OPTIONAL_CAPABILITIES.items()
+    }
+
+
+def _require_capability(app: FastAPI, capability: str) -> None:
+    info = getattr(app.state, "ralph_capabilities", {}).get(capability, {})
+    if info.get("available", False):
+        return
+    module_name = info.get("module", OPTIONAL_CAPABILITIES.get(capability, capability))
+    raise HTTPException(
+        status_code=501,
+        detail=f"Feature not implemented: missing module `{module_name}`",
+    )
 
 
 def _now_iso() -> str:
@@ -139,11 +178,27 @@ def create_dashboard_app(
     app.state.connected_ws = app_state.connected_ws
     app.state.broadcast_queue = app_state.broadcast_queue
     app.state.event_bus = event_bus
+    app.state.ralph_capabilities = _build_capabilities()
+
+    @app.exception_handler(ModuleNotFoundError)
+    async def _module_not_found_handler(_, exc: ModuleNotFoundError) -> JSONResponse:
+        # 显式降级缺失能力，避免调用端点时抛 500。
+        mod = exc.name or ""
+        if mod.startswith("ralph."):
+            return JSONResponse(
+                status_code=501,
+                content={
+                    "detail": f"Feature not implemented: missing module `{mod}`",
+                    "error_type": "module_not_available",
+                },
+            )
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
 
     # 注入 RalphRepository
     if ralph_repository is None:
         from core.ralph_paths import resolve_ralph_dir
-        ralph_dir = resolve_ralph_dir(project_dir) if project_dir else Path(os.environ.get("RALPH_DIR", ".ralph"))
+        project_dir = Path(os.environ.get("PROJECT_DIR", ".")).resolve()
+        ralph_dir = resolve_ralph_dir(project_dir)
         ralph_repository = RalphRepository(ralph_dir)
     app.state.ralph_repository = ralph_repository
 
@@ -280,11 +335,25 @@ def create_dashboard_app(
         return {"success": True, "issue_id": issue_id}
 
     @app.get("/api/execution-ledger")
-    async def get_execution_ledger(feature_id: str | None = None) -> dict:
-        return {
-            "executions": app.state.repository.get_execution_history(feature_id=feature_id),
-            "summary": app.state.repository.get_execution_summary(),
+    async def get_execution_ledger(
+        feature_id: str | None = None,
+        agent_id: str | None = None,
+        status: str | None = None,
+    ) -> dict:
+        executions = app.state.repository.get_execution_history(feature_id=feature_id)
+        if agent_id is not None:
+            executions = [e for e in executions if e.get("agent_id") == agent_id]
+        if status is not None:
+            executions = [e for e in executions if e.get("status") == status]
+
+        summary = {
+            "total_executions": len(executions),
+            "completed": sum(1 for e in executions if e.get("status") == "completed"),
+            "failed": sum(1 for e in executions if e.get("status") == "failed"),
+            "blocked": sum(1 for e in executions if e.get("status") == "blocked"),
+            "retrying": sum(1 for e in executions if e.get("status") == "retrying"),
         }
+        return {"executions": executions, "summary": summary}
 
     # --- REST: 用户对话 ---
 
@@ -662,6 +731,10 @@ def create_dashboard_app(
             "timestamp": _now_iso(),
         }
 
+    @app.get("/api/ralph/capabilities")
+    async def ralph_capabilities() -> dict:
+        return {"capabilities": app.state.ralph_capabilities}
+
     @app.get("/api/ralph/work-units")
     async def ralph_list_work_units(status: str | None = None) -> list[dict]:
         """列出所有 WorkUnit，支持状态过滤。"""
@@ -763,6 +836,7 @@ def create_dashboard_app(
     @app.get("/api/ralph/tastes")
     async def ralph_list_tastes() -> dict:
         """获取所有设计偏好记忆。"""
+        _require_capability(app, "taste_memory")
         from ralph.taste_memory import TasteMemory
         ralph_dir: Path = app.state.ralph_repository._ralph_dir
         tm = TasteMemory(storage_dir=str(ralph_dir))
@@ -771,6 +845,7 @@ def create_dashboard_app(
     @app.delete("/api/ralph/tastes/{taste_id}")
     async def ralph_delete_taste(taste_id: str) -> dict:
         """删除一条设计偏好记忆。"""
+        _require_capability(app, "taste_memory")
         from ralph.taste_memory import TasteMemory
         ralph_dir: Path = app.state.ralph_repository._ralph_dir
         tm = TasteMemory(storage_dir=str(ralph_dir))
@@ -780,6 +855,7 @@ def create_dashboard_app(
     @app.post("/api/ralph/tastes")
     async def ralph_create_taste(body: dict) -> dict:
         """手动创建一条 taste 偏好。"""
+        _require_capability(app, "memory_manager")
         from ralph.memory_manager import MemoryManager
         ralph_dir: Path = app.state.ralph_repository._ralph_dir
         mgr = MemoryManager(ralph_dir)
@@ -803,13 +879,17 @@ def create_dashboard_app(
     @app.get("/api/ralph/security/guard-status")
     async def ralph_guard_status() -> dict:
         """获取 Prompt Injection 防护状态。"""
-        engine = app.state.work_unit_engine
+        engine = getattr(app.state, "ralph_engine", None)
+        if engine is None or not hasattr(engine, "_injection_guard"):
+            raise HTTPException(status_code=503, detail="Ralph engine not configured")
         return engine._injection_guard.get_status()
 
     @app.post("/api/ralph/security/scan")
     async def ralph_scan_prompt(payload: dict) -> dict:
         """手动扫描文本的注入风险（调试用）。"""
-        engine = app.state.work_unit_engine
+        engine = getattr(app.state, "ralph_engine", None)
+        if engine is None or not hasattr(engine, "_injection_guard"):
+            raise HTTPException(status_code=503, detail="Ralph engine not configured")
         text = payload.get("text", "")
         severity = payload.get("severity_threshold", "中")
         cleaned, violations = engine._injection_guard.scan_input(text, severity)
@@ -942,6 +1022,7 @@ def create_dashboard_app(
     @app.post("/api/ralph/work-units/{work_id}/checkpoints/{turn}/restore")
     async def ralph_restore_checkpoint(work_id: str, turn: int) -> dict:
         """从指定 checkpoint 恢复工作状态。"""
+        _require_capability(app, "turn_engine")
         ralph_repo: RalphRepository = app.state.ralph_repository
         unit = ralph_repo.get_work_unit(work_id)
         if unit is None:
@@ -2040,764 +2121,87 @@ def _write_claude_md(path: Path, name: str) -> None:
         )
 
     # --- Ralph API: Memory 端点 ---
-
+    # 高级模块端点（确保已真实注册）
     @app.get("/api/ralph/memory/status")
     async def ralph_memory_status() -> dict:
+        _require_capability(app, "memory_manager")
         cfg: RalphConfigManager = app.state.config_manager
         ralph_dir = cfg._dir.parent
         from ralph.memory_manager import MemoryManager
+
         return MemoryManager(ralph_dir).get_status()
 
-    @app.get("/api/ralph/memory/search")
-    async def ralph_memory_search(q: str = "", top_k: int = 10) -> list[dict]:
-        if not q:
-            return []
+    @app.get("/api/ralph/knowledge-graph/status")
+    async def ralph_kg_status() -> dict:
+        _require_capability(app, "knowledge_graph")
         cfg: RalphConfigManager = app.state.config_manager
         ralph_dir = cfg._dir.parent
-        from ralph.memory_manager import MemoryManager
-        return MemoryManager(ralph_dir).search(q, top_k)
+        from ralph.knowledge_graph import KnowledgeGraphService
 
-    @app.get("/api/ralph/memory/l1-snapshot")
-    async def ralph_memory_l1_snapshot() -> dict:
-        """L1 状态快照 — 为 PM Agent 调度提供当前上下文。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        from ralph.memory_manager import MemoryManager
-        from ralph.repository import RalphRepository
-        mgr = MemoryManager(ralph_dir)
-        repo = RalphRepository(ralph_dir)
-        work_units = repo.list_work_units()
-        from dataclasses import asdict
-        active = [asdict(wu) for wu in work_units if wu.status.value not in ("draft", "ready", "accepted")]
-        return mgr.get_l1_snapshot(active)
-
-    @app.post("/api/ralph/memory/compact")
-    async def ralph_memory_compact(body: dict[str, Any]) -> dict:
-        """压缩指定 WorkUnit 的记忆。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        work_id = body.get("work_id", "")
-        if not work_id:
-            return {"success": False, "error": "缺少 work_id"}
-        from ralph.memory_manager import MemoryManager
-        from ralph.repository import RalphRepository
-        mgr = MemoryManager(ralph_dir)
-        repo = RalphRepository(ralph_dir)
-        wu = repo.get_work_unit(work_id)
-        if not wu:
-            return {"success": False, "error": f"WorkUnit {work_id} 不存在"}
-        from dataclasses import asdict
-        result = mgr.on_work_unit_completed(asdict(wu))
-        return {"success": True, **result}
-
-    @app.get("/api/ralph/memory/config")
-    async def ralph_memory_get_config() -> dict:
-        """获取记忆系统配置。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        from ralph.memory_manager import MemoryManager
-        return MemoryManager(ralph_dir).thresholds
-
-    @app.put("/api/ralph/memory/config")
-    async def ralph_memory_update_config(body: dict[str, Any]) -> dict:
-        """更新记忆系统配置。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        from ralph.memory_manager import MemoryManager
-        mgr = MemoryManager(ralph_dir)
-        mgr.update_thresholds(body)
-        return {"success": True, "thresholds": mgr.thresholds}
-
-    # --- Ralph API: Context Engine 端点 ---
-
-    @app.post("/api/ralph/context/pm")
-    async def ralph_context_pm(body: dict[str, Any]) -> dict:
-        """构建 PM Agent 上下文。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        project_dir = ralph_dir.parent
-        mode = body.get("mode", "schedule")
-        from ralph.context_engine import ContextEngine
-        from ralph.repository import RalphRepository
-        engine = ContextEngine(project_dir)
-        repo = RalphRepository(ralph_dir)
-        work_units = repo.list_work_units()
-        from dataclasses import asdict
-        active = [asdict(wu) for wu in work_units if wu.status.value not in ("draft", "ready", "accepted")]
-        pending = body.get("pending_decisions")
-        context = engine.build_pm_context(
-            mode=mode,
-            active_work_units=active,
-            pending_decisions=pending,
-        )
-        return {"success": True, "context": context, "mode": mode}
-
-    @app.post("/api/ralph/context/incremental")
-    async def ralph_context_incremental(body: dict[str, Any]) -> dict:
-        """构建增量上下文（Continuation 场景）。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        project_dir = ralph_dir.parent
-        work_id = body.get("work_id", "")
-        if not work_id:
-            return {"success": False, "error": "缺少 work_id"}
-        from ralph.context_engine import ContextEngine
-        engine = ContextEngine(project_dir)
-        context = engine.build_incremental(
-            work_id=work_id,
-            checkpoint=body.get("checkpoint"),
-            current_error=body.get("current_error", ""),
-            next_goal=body.get("next_goal", ""),
-        )
-        return {"success": True, "context": context, "work_id": work_id}
-
-    # --- Ralph API: PM Agent 端点 ---
-
-    @app.get("/api/ralph/pm/status")
-    async def ralph_pm_status() -> dict:
-        """PM Agent 调度状态。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        project_dir = ralph_dir.parent
-        from ralph.pm_agent import PMAgent
-        from ralph.work_unit_engine import WorkUnitEngine
-        engine = WorkUnitEngine(project_dir)
-        agent = PMAgent(project_dir, engine=engine)
-        return agent.get_status()
-
-    @app.get("/api/ralph/pm/context")
-    async def ralph_pm_context() -> dict:
-        """PM Agent 上下文（L0 + L1）。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        project_dir = ralph_dir.parent
-        from ralph.pm_agent import PMAgent
-        from ralph.work_unit_engine import WorkUnitEngine
-        engine = WorkUnitEngine(project_dir)
-        agent = PMAgent(project_dir, engine=engine)
-        context = agent.get_context()
-        return {"success": True, "context": context}
-
-    @app.post("/api/ralph/pm/schedule")
-    async def ralph_pm_schedule() -> dict:
-        """执行一次 PM Agent 调度。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        project_dir = ralph_dir.parent
-        from ralph.pm_agent import PMAgent
-        from ralph.work_unit_engine import WorkUnitEngine
-        engine = WorkUnitEngine(project_dir)
-        agent = PMAgent(project_dir, engine=engine)
-        results = await agent.schedule_once()
-        return {
-            "success": True,
-            "actions": len(results),
-            "results": [
-                {"action": r.action, "work_id": r.work_id, "success": r.success, "summary": r.summary}
-                for r in results
-            ],
-        }
-
-    # --- Ralph API: Turn Engine 端点 ---
+        return KnowledgeGraphService(ralph_dir).get_status()
 
     @app.get("/api/ralph/executions")
     async def ralph_list_executions() -> list[str]:
-        """列出所有多轮执行记录。"""
+        _require_capability(app, "turn_engine")
         cfg: RalphConfigManager = app.state.config_manager
         ralph_dir = cfg._dir.parent
         from ralph.turn_engine import TurnBasedExecutionEngine
+
         engine = TurnBasedExecutionEngine(ralph_dir.parent)
         return engine.list_executions()
 
     @app.get("/api/ralph/executions/{work_id}")
     async def ralph_get_execution(work_id: str) -> dict:
-        """获取多轮执行状态。"""
+        _require_capability(app, "turn_engine")
         cfg: RalphConfigManager = app.state.config_manager
         ralph_dir = cfg._dir.parent
         from ralph.turn_engine import TurnBasedExecutionEngine
+
         engine = TurnBasedExecutionEngine(ralph_dir.parent)
         result = engine.get_execution_status(work_id)
         if result is None:
             return {"success": False, "error": f"执行记录 {work_id} 不存在"}
         return {"success": True, "execution": result}
 
-    # --- Ralph API: Budget 端点 ---
-
-    @app.get("/api/ralph/budget")
-    async def ralph_get_budget() -> dict:
-        """获取预算配置和当前用量。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        return cfg.get_budget_config()
-
-    @app.put("/api/ralph/budget")
-    async def ralph_update_budget(body: dict[str, Any]) -> dict:
-        """更新预算配置。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        return cfg.update_budget_config(body)
-
-    # --- Ralph API: Workspace 端点 ---
-
-    @app.get("/api/ralph/workspaces")
-    async def ralph_list_workspaces() -> list[dict]:
-        """列出活跃 worktree。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        from ralph.parallel_executor import WorktreeManager
-        from pathlib import Path
-        mgr = WorktreeManager(cfg._dir.parent.parent)
-        trees = mgr.list_active()
-        return [{"name": t.name, "path": str(t.path), "branch": t.branch, "status": t.status}
-                for t in trees]
-
-    # --- Ralph API: Knowledge Graph 端点 ---
-
-    @app.get("/api/ralph/knowledge-graph/status")
-    async def ralph_kg_status() -> dict:
-        """知识图谱状态统计。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        from ralph.knowledge_graph import KnowledgeGraphService
-        kg = KnowledgeGraphService(ralph_dir)
-        return kg.get_status()
-
-    @app.get("/api/ralph/knowledge-graph/data")
-    async def ralph_kg_data() -> dict:
-        """知识图谱完整数据（前端可视化）。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        from ralph.knowledge_graph import KnowledgeGraphService
-        kg = KnowledgeGraphService(ralph_dir)
-        return kg.get_graph_data()
-
-    @app.get("/api/ralph/knowledge-graph/impact")
-    async def ralph_kg_impact(file_path: str = "") -> dict:
-        """查询文件影响面。"""
-        if not file_path:
-            return {"success": False, "error": "缺少 file_path"}
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        from ralph.knowledge_graph import KnowledgeGraphService
-        kg = KnowledgeGraphService(ralph_dir)
-        return kg.query_impact(file_path)
-
-    # --- Ralph API: Retrieval 端点 ---
-
-    @app.get("/api/ralph/search")
-    async def ralph_search(q: str = "", top_k: int = 20) -> dict:
-        """全量检索（三层管道）。"""
-        if not q:
-            return {"query": "", "total": 0, "combined": []}
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        from ralph.retrieval_pipeline import RetrievalPipeline
-        pipeline = RetrievalPipeline(ralph_dir)
-        return pipeline.search(q, top_k)
-
-    @app.post("/api/ralph/projects/pipeline")
-    async def ralph_run_pipeline(body: dict[str, Any] | None = None) -> dict:
-        """运行完整分析管道：Retrieval → Think → Plan → Recon → Coupling → Contracts → Tasks。
-
-        这是 Ralph 的核心流水线入口，将三层检索、历史教训注入、自动调参
-        全部串联，形成完整的飞轮效应。
-        """
-        body = body or {}
-        project_path_str = body.get("path", os.environ.get("PROJECT_DIR", "."))
-        project_path = Path(project_path_str).resolve()
-        prd_text = body.get("prd_text", "")
-
-        if not project_path.is_dir():
-            raise HTTPException(status_code=404, detail=f"Directory not found: {project_path_str}")
-        if not prd_text:
-            raise HTTPException(status_code=422, detail="prd_text is required for pipeline")
-
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-
-        # 初始化依赖服务
-        from ralph.project_analyzer import ProjectAnalyzer
-        from ralph.recon_analyzer import ReconAnalyzer
-        from ralph.coupling_analyzer import CouplingAnalyzer
-        from ralph.contract_manager import ContractManager
-        from ralph.task_decomposer import TaskDecomposer
-        from ralph.pipeline import AnalysisPipeline
-        from ralph.knowledge_graph import KnowledgeGraphService
-        from ralph.graphify_service import GraphifyService
-
-        project_analysis = _analyze_project(project_path)
-
-        recon = ReconAnalyzer(ralph_dir)
-        coupling = CouplingAnalyzer(ralph_dir)
-        contracts = ContractManager(ralph_dir)
-        decomposer = TaskDecomposer(ralph_dir)
-        kg = KnowledgeGraphService(ralph_dir)
-        graphify = GraphifyService(ralph_dir)
-
-        pipeline = AnalysisPipeline(ralph_dir)
-        ctx = pipeline.run(
-            project_path=project_path,
-            project_analysis=project_analysis,
-            recon_analyzer=recon,
-            coupling_analyzer=coupling,
-            contract_manager=contracts,
-            task_decomposer=decomposer,
-            prd_text=prd_text,
-            knowledge_graph=kg,
-            graphify_service=graphify,
-        )
-
-        return {
-            "success": True,
-            "think": ctx.think_result,
-            "plan": ctx.plan_result,
-            "retrieval": ctx.retrieval_context,
-            "modules": ctx.modules,
-            "high_risk_modules": ctx.high_risk_modules,
-            "suggested_contracts": ctx.suggested_contracts,
-        }
-
-    # --- Ralph API: Phase 4 端点 ---
-
-    @app.get("/api/ralph/usage/stats")
-    async def ralph_usage_stats() -> dict:
-        """获取 API 用量和成本统计。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        stats = cfg.get_usage_stats()
-        # 按 provider 汇总
-        log = cfg._read_json("usage-log.json", [])
-        by_provider: dict[str, int] = {}
-        for entry in log:
-            pid = entry.get("provider_id", "unknown")
-            by_provider[pid] = by_provider.get(pid, 0) + 1
-        stats["by_provider"] = by_provider
-        return stats
-
-    @app.get("/api/ralph/projects/history")
-    async def ralph_project_history() -> list[dict]:
-        """列出历史项目记录。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        recent = cfg.list_recent_projects()
-        history = []
-        for p in recent:
-            path = Path(p["path"])
-            has_ralph = (path / ".ralph").is_dir()
-            work_units = len(list((path / ".ralph" / "work_units").glob("*.json"))) if has_ralph else 0
-            history.append({
-                "name": p.get("name", path.name),
-                "path": p["path"],
-                "last_opened_at": p.get("last_opened_at", ""),
-                "has_ralph": has_ralph,
-                "work_unit_count": work_units,
-                "status": "completed" if work_units > 0 else "empty",
-            })
-        return history
-
-    @app.get("/api/ralph/providers/health")
-    async def ralph_providers_health() -> list[dict]:
-        """获取所有 Provider 的健康状态。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        results = []
-        for p in cfg.list_providers():
-            # 简单连通性检查
-            import urllib.request
-            healthy = False
-            base_url = p.get("base_url", "")
-            if base_url:
-                try:
-                    urllib.request.urlopen(f"{base_url.rstrip('/')}/models", timeout=5)
-                    healthy = True
-                except Exception:
-                    healthy = False
-            results.append({
-                "id": p.get("id"),
-                "name": p.get("name"),
-                "enabled": p.get("enabled", False),
-                "healthy": healthy,
-                "last_tested_at": p.get("last_tested_at"),
-                "last_test_result": p.get("last_test_result"),
-            })
-        return results
-
-    # --- Ralph API: Specs + Contracts + Recon + Verification 端点 ---
-
-    @app.get("/api/ralph/specs")
-    async def ralph_list_specs() -> list[dict]:
-        from ralph.spec_change_manager import SpecChangeManager
-        cfg: RalphConfigManager = app.state.config_manager
-        return SpecChangeManager(cfg._dir.parent).list_specs()
-
-    @app.post("/api/ralph/specs/changes")
-    async def ralph_create_change(body: dict[str, Any]) -> dict:
-        from ralph.spec_change_manager import SpecChangeManager
-        from ralph.schema.spec_document import SpecChange
-        cfg: RalphConfigManager = app.state.config_manager
-        mgr = SpecChangeManager(cfg._dir.parent)
-        change = mgr.create_change(SpecChange(**body))
-        return {"change_id": change.change_id, "status": change.status}
-
-    @app.post("/api/ralph/specs/changes/{change_id}/approve")
-    async def ralph_approve_change(change_id: str) -> dict:
-        from ralph.spec_change_manager import SpecChangeManager
-        cfg: RalphConfigManager = app.state.config_manager
-        change = SpecChangeManager(cfg._dir.parent).approve_change(change_id)
-        if not change:
-            raise HTTPException(status_code=404, detail="Change not found")
-        return {"change_id": change.change_id, "status": change.status}
-
-    @app.get("/api/ralph/contracts")
-    async def ralph_list_contracts() -> list[dict]:
-        from ralph.contract_manager import ContractManager
-        cfg: RalphConfigManager = app.state.config_manager
-        return ContractManager(cfg._dir.parent).list_contracts()
-
-    @app.post("/api/ralph/contracts")
-    async def ralph_create_contract(body: dict[str, Any]) -> dict:
-        from ralph.contract_manager import ContractManager
-        from ralph.schema.contract import InterfaceContract
-        cfg: RalphConfigManager = app.state.config_manager
-        contract = ContractManager(cfg._dir.parent).save(InterfaceContract(**body))
-        return {"contract_id": contract.contract_id, "status": contract.status}
-
-    @app.post("/api/ralph/projects/recon")
-    async def ralph_recon_analyze(body: dict[str, Any]) -> dict:
-        from ralph.recon_analyzer import ReconAnalyzer
-        project_path = Path(body.get("path", os.environ.get("PROJECT_DIR", ".")))
-        analyzer = ReconAnalyzer()
-        return {"success": True, "analysis": analyzer.analyze(project_path.resolve())}
-
-    @app.post("/api/ralph/verification/checklist")
-    async def ralph_build_checklist(body: dict[str, Any]) -> dict:
-        from ralph.verification_manager import VerificationManager
-        cfg: RalphConfigManager = app.state.config_manager
-        vm = VerificationManager(cfg._dir.parent)
-        checklist = vm.build_checklist(body.get("work_id", ""))
-        vm.save_checklist(checklist)
-        return {"work_id": checklist.work_id, "checks": len(checklist.checks)}
-
-    @app.get("/api/ralph/toolchain/available")
-    async def ralph_toolchain_available() -> list[dict]:
-        from ralph.tool_adapter import ToolAdapterRegistry, ClaudeCodeAdapter
-        registry = ToolAdapterRegistry()
-        registry.register(ClaudeCodeAdapter())
-        available = registry.list_available()
-        return [{"tool_id": tid, "available": tid in available} for tid in registry._priority]
-
-    @app.get("/api/ralph/issues")
-    async def ralph_list_issues() -> list[dict]:
-        from ralph.issue_source_adapter import LocalFileIssueSource, IssueClassifier
-        cfg: RalphConfigManager = app.state.config_manager
-        issues_dir = cfg._dir.parent / "issues"
-        source = LocalFileIssueSource(issues_dir)
-        classifier = IssueClassifier()
-        issues = source.fetch()
-        return [{
-            "issue_id": i.issue_id, "title": i.title,
-            "issue_type": classifier.classify(i).issue_type,
-            "source": i.source, "status": i.status,
-        } for i in issues]
-
-    @app.post("/api/ralph/issues/auto-create")
-    async def ralph_issues_auto_create() -> dict:
-        """将未处理的 Issue 按策略自动生成为 WorkUnit。"""
-        from ralph.issue_source_adapter import (
-            LocalFileIssueSource, IssueClassifier, issues_to_work_units,
-        )
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        issues_dir = ralph_dir / "issues"
-        source = LocalFileIssueSource(issues_dir)
-        classifier = IssueClassifier()
-        policy = cfg.get_issue_policy()
-        issues = source.fetch()
-        classified = [classifier.classify(i) for i in issues]
-        units = issues_to_work_units(classified, policy)
-        # 写入 tasks 目录，供后续处理
-        tasks_dir = ralph_dir / "tasks"
-        tasks_dir.mkdir(parents=True, exist_ok=True)
-        import json as _json
-        (tasks_dir / "auto_created_tasks.json").write_text(
-            _json.dumps(units, indent=2, ensure_ascii=False),
-        )
-        return {"total_issues": len(issues), "auto_created": len(units), "tasks": units}
-
-    # --- Ralph API: Source Docs Check + Coupling Analyzer 端点 ---
-
-    @app.post("/api/ralph/source-docs/scan")
-    async def ralph_source_docs_scan(body: dict[str, Any]) -> dict:
-        from ralph.source_docs_check import SourceDocsCheck
-        project_path = Path(body.get("path", os.environ.get("PROJECT_DIR", ".")))
-        checker = SourceDocsCheck()
-        deps = [{"name": d.name, "version": d.version, "category": d.category}
-                for d in checker.scan_dependencies(project_path)]
-        docs = [{"topic": d.topic, "url": d.url, "notes": d.notes}
-                for d in checker.get_all_docs(deps)]
-        return {"dependencies": deps, "docs_sources": docs,
-                "report": checker.markdown_report(project_path)}
-
-    @app.post("/api/ralph/coupling/analyze")
-    async def ralph_coupling_analyze(body: dict[str, Any]) -> dict:
-        from ralph.coupling_analyzer import CouplingAnalyzer
-        project_path = Path(body.get("path", os.environ.get("PROJECT_DIR", ".")))
-        analyzer = CouplingAnalyzer()
-        modules = analyzer.analyze(project_path)
-        return {
-            "modules": [
-                {"name": m.name, "file_count": m.file_count,
-                 "import_degree": m.import_degree, "dependents": m.dependents,
-                 "risk_score": m.risk_score}
-                for m in modules
-            ],
-            "parallelization": analyzer.suggest_parallelization(modules),
-        }
-
-    # ── Issue Tracker Webhook + Config ─────────────────────
-
-    @app.post("/api/ralph/issues/webhook")
-    async def ralph_issues_webhook(body: dict[str, Any]) -> dict:
-        """接收 GitHub Issue webhook。
-
-        支持:
-        - issue_comment: /ralph 命令解析 → 创建 Command
-        - issues: opened/reopened → 自动同步
-        """
-        from ralph.issue_command_parser import comment_to_command
-
-        action = body.get("action", "")
-        issue_data = body.get("issue", {})
-        comment_data = body.get("comment", {})
-        issue_number = issue_data.get("number", 0)
-
-        # Issue 评论命令
-        if action == "created" and comment_data:
-            cmd = comment_to_command(comment_data, str(issue_number))
-            if cmd:
-                from core.state_models import Command as CmdModel
-                command = CmdModel(
-                    command_id=f"issue_cmd_{_now_iso()}",
-                    type=cmd["type"],
-                    target_id=cmd.get("work_id", issue_data.get("title", "")),
-                    payload=cmd,
-                    issued_at=_now_iso(),
-                )
-                repo: ProjectStateRepository = app.state.repository
-                repo.save_command(command)
-                logger.info("Issue #%s 命令已创建: %s", issue_number, cmd["type"])
-                return {"webhook": "command_created", "issue": issue_number, "command": cmd["type"]}
-
-        # Issue 打开/关闭 → 同步状态
-        if action in ("opened", "reopened", "closed"):
-            labels = [l.get("name", "") for l in issue_data.get("labels", [])]
-            return {
-                "webhook": "issue_sync",
-                "issue": issue_number,
-                "action": action,
-                "labels": labels,
-            }
-
-        return {"webhook": "ignored", "action": action}
-
-    @app.post("/api/ralph/issues/sync")
-    async def ralph_issues_sync(body: dict[str, Any]) -> dict:
-        """手动触发 Issue ↔ WorkUnit 同步。"""
-        from ralph.issue_source_adapter import (
-            GitHubIssueSource, LocalFileIssueSource, IssueClassifier,
-        )
-        from ralph.issue_sync_protocol import IssueSyncProtocol
-
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        policy = cfg.get_issue_policy()
-        protocol = IssueSyncProtocol(ralph_dir)
-
-        # 从配置的 source 拉取
-        source_type = body.get("source", "local")
-        results: dict[str, Any] = {"synced_issues": 0, "commands_created": 0}
-
-        if source_type == "github":
-            tracker_cfg = cfg.get_issue_tracker_config()
-            if tracker_cfg.get("repo"):
-                source = GitHubIssueSource(
-                    repo=tracker_cfg["repo"],
-                    token=tracker_cfg.get("token", ""),
-                    label=body.get("label", ""),
-                )
-            else:
-                return {"error": "GitHub repo not configured", "synced": False}
-        else:
-            issues_dir = ralph_dir / "issues"
-            source = LocalFileIssueSource(issues_dir)
-
-        classifier = IssueClassifier()
-        issues = source.fetch()
-        classified = [classifier.classify(i) for i in issues]
-        requests = protocol.sync_from_tracker(source, policy)
-        results["synced_issues"] = len(requests)
-
-        # 如果有需要自动创建的，写入 tasks 目录
-        if requests:
-            tasks_dir = ralph_dir / "tasks"
-            tasks_dir.mkdir(parents=True, exist_ok=True)
-            import json as _json
-            (tasks_dir / "synced_tasks.json").write_text(
-                _json.dumps(requests, indent=2, ensure_ascii=False),
-            )
-            results["commands_created"] = len(requests)
-            results["requests"] = requests
-
-        return results
-
-    @app.get("/api/ralph/issues/config")
-    async def ralph_issues_get_config() -> dict:
-        cfg: RalphConfigManager = app.state.config_manager
-        return cfg.get_issue_tracker_config()
-
-    @app.put("/api/ralph/issues/config")
-    async def ralph_issues_put_config(body: dict[str, Any]) -> dict:
-        cfg: RalphConfigManager = app.state.config_manager
-        return cfg.save_issue_tracker_config(body)
-
-    @app.get("/api/ralph/issues/sync-status")
-    async def ralph_issues_sync_status() -> dict:
-        """获取同步状态。"""
-        from ralph.issue_sync_protocol import IssueSyncProtocol
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        protocol = IssueSyncProtocol(ralph_dir)
-        return protocol.get_sync_state()
-
-    # ── Retro API ─────────────────────────────────────────────
-
-    @app.get("/api/ralph/retros")
-    async def ralph_list_retros(limit: int = 50, work_id: str | None = None) -> list[dict]:
-        """列出反思回顾记录。"""
-        repo: RalphRepository = app.state.ralph_repository
-        retros = repo.list_retros(work_id=work_id, limit=limit)
-        return [repo._serialize_retro(r) for r in retros]
-
-    @app.get("/api/ralph/retros/summary")
-    async def ralph_retro_summary(period: str = "week") -> dict:
-        """获取周/月 retro 汇总统计。"""
-        from ralph.memory_manager import MemoryManager
-        repo: RalphRepository = app.state.ralph_repository
-        mgr = MemoryManager(repo._ralph_dir)
-        return mgr.get_retro_summary(period=period)
-
-    @app.get("/api/ralph/retros/{work_id}")
-    async def ralph_get_retro(work_id: str) -> dict:
-        """获取指定 WorkUnit 的反思回顾。"""
-        repo: RalphRepository = app.state.ralph_repository
-        retro = repo.get_retro(f"retro-{work_id}")
-        if retro is None:
-            raise HTTPException(status_code=404, detail=f"Retro for {work_id} not found")
-        return repo._serialize_retro(retro)
-
-    # ── Review Matrix API ─────────────────────────────────────
-
-    @app.get("/api/ralph/work-units/{work_id}/review-matrix")
-    async def ralph_get_review_matrix(work_id: str) -> dict:
-        """获取多维度评审详情。"""
-        repo: RalphRepository = app.state.ralph_repository
-        reviews = repo.list_reviews(work_id=work_id)
-        # 找最新的含 dimension_results 的评审
-        for review in reversed(reviews):
-            if review.dimension_results:
-                return repo._serialize_review(review)
-        if reviews:
-            return repo._serialize_review(reviews[-1])
-        raise HTTPException(status_code=404, detail=f"No reviews for {work_id}")
-
-    @app.get("/api/ralph/review-matrix/config")
-    async def ralph_get_review_config() -> list[dict]:
-        """获取评审矩阵配置。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        return cfg.get_review_matrix_config()
-
-    @app.post("/api/ralph/review-matrix/config")
-    async def ralph_save_review_config(body: list[dict]) -> list[dict]:
-        """保存评审矩阵配置。"""
-        cfg: RalphConfigManager = app.state.config_manager
-        return cfg.save_review_matrix_config(body)
-
-    # ── Ship API ──────────────────────────────────────────────
-
-    @app.post("/api/ralph/ship/{work_id}")
-    async def ralph_ship_work_unit(work_id: str, body: dict | None = None) -> dict:
-        """发布 WorkUnit：验证 → 创建发布分支 → 打 tag → 生成 changelog。
-
-        body 支持:
-          - strategy: patch | minor | major
-          - dry_run: 仅验证不发布
-        """
-        repo: RalphRepository = app.state.ralph_repository
-        from ralph.ship_service import ShipService
-
-        project_dir = repo._ralph_dir.parent
-        svc = ShipService(repo._ralph_dir, project_dir)
-
-        body = body or {}
-        dry_run = body.get("dry_run", False)
-        if dry_run:
-            blockers = svc.verify_pre_ship(work_id)
-            return {"success": not blockers, "blockers": blockers}
-
-        strategy = body.get("strategy", "patch")
-        result = svc.ship_work_unit(work_id, strategy=strategy)
-
-        if not result.success:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=400, detail=result.message)
-
-        return {
-            "success": True,
-            "tag": result.tag,
-            "branch": result.branch,
-            "changelog_path": result.changelog_path,
-            "message": result.message,
-        }
-
-    @app.get("/api/ralph/releases")
-    async def ralph_list_releases() -> list[dict]:
-        """获取 Release 历史。"""
-        from ralph.ship_service import ShipService
-        ralph_dir: Path = app.state.ralph_repository._ralph_dir
-        project_dir = ralph_dir.parent
-        svc = ShipService(ralph_dir, project_dir)
-
-        releases_dir = ralph_dir / "releases"
-        if not releases_dir.is_dir():
-            return []
-
-        releases = []
-        for path in sorted(releases_dir.glob("*.md"), reverse=True):
-            content = path.read_text(encoding="utf-8")
-            releases.append({
-                "name": path.stem,
-                "changelog": content[:500],
-                "created_at": _now_iso(),  # 从文件名或 git tag 获取会更精确
-            })
-        return releases
-
-    # 注册 StartupRecover（启动后扫描 RUNNING → INTERRUPTED）
-    from ralph.recovery import StartupRecover
-    startup_recover = StartupRecover(app.state.ralph_repository._ralph_dir)
-    startup_recover.run(app.state.ralph_repository)
-    app.state.startup_recover = startup_recover
+    if app.state.ralph_capabilities["recovery"]["available"]:
+        from ralph.recovery import StartupRecover
+
+        startup_recover = StartupRecover(app.state.ralph_repository._ralph_dir)
+        startup_recover.run(app.state.ralph_repository)
+        app.state.startup_recover = startup_recover
+    else:
+        app.state.startup_recover = None
 
     @app.get("/api/recovery-report")
-    async def get_recovery_report():
-        """获取最近的恢复报告."""
+    async def get_recovery_report() -> dict:
+        if app.state.startup_recover is None:
+            raise HTTPException(status_code=501, detail="Feature not implemented: missing module `ralph.recovery`")
         report = app.state.startup_recover.get_report()
-        if report:
-            return {"success": True, "report": {
+        if report is None:
+            return {"success": True, "report": None}
+        return {
+            "success": True,
+            "report": {
                 "interrupted_count": report.interrupted_count,
                 "work_unit_ids": report.work_unit_ids,
                 "titles": report.titles,
                 "created_at": report.created_at,
-            }}
-        return {"success": True, "report": None}
+            },
+        }
 
-    # 注册 Feature API 路由
+    try:
+        from dashboard.api.feature_routes import router as feature_router
+    except ModuleNotFoundError as err:
+        logger.warning("feature_routes missing, dashboard starts without feature routes: %s", err)
+        feature_router = APIRouter()
     app.include_router(feature_router)
+    app.include_router(register_ralph_extended_routes(app))
 
     return app
+    return app
+
+
+
 def _analyze_project(project_path: Path) -> dict:
     """轻量级代码库侦察。"""
     import json as _json

@@ -1,8 +1,16 @@
 'use client'
 
 import { useState } from 'react'
-import { useDashboardStore } from '@/lib/store'
 import { toast } from 'sonner'
+import {
+  useApprove,
+  useReject,
+  usePauseFeature,
+  useResumeFeature,
+  useRetryFeature,
+  useSkipFeature,
+  useFeatures,
+} from '@/lib/hooks/useDashboardQueries'
 
 interface CommandButton {
   label: string
@@ -13,37 +21,45 @@ interface CommandButton {
 
 export function CommandBar() {
   const [loading, setLoading] = useState<string | null>(null)
-  const selectedFeature = useDashboardStore((s) => s.features.find((f) => f.status === 'in_progress'))
+  const approveMutation = useApprove()
+  const rejectMutation = useReject()
+  const pauseMutation = usePauseFeature()
+  const resumeMutation = useResumeFeature()
+  const retryMutation = useRetryFeature()
+  const skipMutation = useSkipFeature()
+  // 从快照中取 features，找 in_progress 的那个
+  const { data: features = [] } = useFeatures('default', '')
+  const selectedFeature = features.find((f) => f.status === 'in_progress')
 
   const commands: CommandButton[] = [
     {
       label: '审批通过',
-      action: (targetId: string) => useDashboardStore.getState().approve(targetId),
+      action: (targetId: string) => approveMutation.mutateAsync(targetId),
       color: 'bg-green-600 hover:bg-green-700',
     },
     {
       label: '驳回',
-      action: (targetId: string) => useDashboardStore.getState().reject(targetId),
+      action: (targetId: string) => rejectMutation.mutateAsync(targetId),
       color: 'bg-red-600 hover:bg-red-700',
     },
     {
       label: '暂停',
-      action: (targetId: string) => useDashboardStore.getState().pause(targetId),
+      action: (targetId: string) => pauseMutation.mutateAsync(targetId),
       color: 'bg-yellow-600 hover:bg-yellow-700',
     },
     {
       label: '恢复',
-      action: (targetId: string) => useDashboardStore.getState().resume(targetId),
+      action: (targetId: string) => resumeMutation.mutateAsync(targetId),
       color: 'bg-blue-600 hover:bg-blue-700',
     },
     {
       label: '重试',
-      action: (targetId: string) => useDashboardStore.getState().retry(targetId),
+      action: (targetId: string) => retryMutation.mutateAsync(targetId),
       color: 'bg-purple-600 hover:bg-purple-700',
     },
     {
       label: '跳过',
-      action: (targetId: string) => useDashboardStore.getState().skip(targetId),
+      action: (targetId: string) => skipMutation.mutateAsync(targetId),
       color: 'bg-gray-600 hover:bg-gray-700',
     },
   ]

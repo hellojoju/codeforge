@@ -157,12 +157,15 @@ class AgentPool:
     def get_status(self) -> dict:
         """获取 pool 当前状态，供 Dashboard 查询。"""
         with self._lock:
-            agents = []
+            agents = [inst.to_dict() for inst in self._instances.values()]
+            roles: dict[str, dict] = {}
             for inst in self._instances.values():
-                agents.append(inst.to_dict())
+                r = roles.setdefault(inst.role, {"total": 0, "idle": 0, "busy": 0, "error": 0})
+                r["total"] += 1
+                r[inst.status] = r.get(inst.status, 0) + 1
             return {
                 "total_instances": len(self._instances),
-                "by_role": self.stats()["by_role"],
+                "by_role": roles,
                 "agents": agents,
             }
 

@@ -260,8 +260,18 @@ export async function listBlockingIssues(
   return data.issues as BlockingIssue[]
 }
 
-export async function fetchExecutionLedger(): Promise<ExecutionLedger> {
-  const res = await fetch(`${API_BASE}/api/execution-ledger`)
+export async function fetchExecutionLedger(params?: {
+  featureId?: string
+  agentId?: string
+  status?: 'started' | 'completed' | 'failed' | 'retrying' | 'blocked'
+}): Promise<ExecutionLedger> {
+  const query = new URLSearchParams()
+  if (params?.featureId) query.set('feature_id', params.featureId)
+  if (params?.agentId) query.set('agent_id', params.agentId)
+  if (params?.status) query.set('status', params.status)
+  const qs = query.toString()
+  const url = `${API_BASE}/api/execution-ledger${qs ? `?${qs}` : ''}`
+  const res = await fetch(url)
   if (!res.ok) throw new Error(`Failed to fetch execution ledger: ${res.status}`)
   return res.json()
 }

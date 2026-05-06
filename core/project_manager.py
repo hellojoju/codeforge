@@ -9,6 +9,7 @@ PM是整个系统的大脑：
 
 import asyncio
 import contextlib
+import importlib
 import json
 import shutil
 import subprocess
@@ -49,8 +50,9 @@ ROLE_INSTANCE_COUNTS = {
 class ProjectManager:
     """PM Agent - 全自动开发系统的核心"""
 
-    def __init__(self, project_dir: Path):
+    def __init__(self, project_dir: Path, event_bus=None):
         self.project_dir = project_dir
+        self.event_bus = event_bus  # 可选，Dashboard 注入时用于 WebSocket 广播
         self.permission_guard = PermissionGuard(self.project_dir)
         self._configure_project_paths()
         self.repository = self._create_repository()
@@ -76,7 +78,8 @@ class ProjectManager:
         core.progress_logger.PROGRESS_FILE = self.project_dir / "data" / "claude-progress.txt"
 
     def _create_repository(self) -> "ProjectStateRepository":
-        from dashboard.state_repository import ProjectStateRepository
+        repo_mod = importlib.import_module("dashboard.state_repository")
+        ProjectStateRepository = getattr(repo_mod, "ProjectStateRepository")
 
         state_dir = self.project_dir / "data" / "dashboard"
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -188,6 +191,37 @@ class ProjectManager:
             ))
 
             task_success = result.get("success", False)
+
+            # Agent 主动上报阻塞（如缺环境、缺凭证等）
+            blocking_type = result.get("blocking_type")
+            if blocking_type and not task_success:
+                blocking_msg = result.get("blocking_message", result.get("error", "未知阻塞"))
+                # blocking_type 可能是值（如 "missing_env"）或成员名（如 "MISSING_ENV"）
+                blocking_enum = None
+                for bt in BlockingType:
+                    if bt.value == blocking_type or bt.name == blocking_type:
+                        blocking_enum = bt
+                        break
+                if blocking_enum is None:
+                    blocking_enum = BlockingType.CODE_ERROR
+                self._mark_feature_blocked(
+                    feature,
+                    reason=blocking_msg,
+                    issue_type=blocking_enum,
+                    detected_by="agent",
+                    context={"blocking_type": blocking_type},
+                    agent_id=instance.instance_id,
+                )
+                self._log(f"{feature.id} 被 Agent 阻塞: {blocking_type} — {blocking_msg}")
+                self.pool.release(instance.instance_id, task_success=False)
+                released = self.pool.get_instance(instance.instance_id)
+                if released is not None:
+                    self._sync_agent_instance(
+                        released, status=released.status,
+                        current_feature=released.current_task_id or None,
+                    )
+                return
+
             if task_success:
                 # 验收 — 验证 workspace 中的文件，然后合并回项目根目录
                 workspace_dir = instance.workspace_path if hasattr(instance, "workspace_path") else None
@@ -421,6 +455,15 @@ class ProjectManager:
             issue_type=issue.issue_type,
             description=issue.description,
         )
+        # 通过 EventBus 广播到 WebSocket
+        if self.event_bus is not None:
+            self.event_bus.emit(
+                "blocking_issue_created",
+                feature_id=feature.id,
+                issue_id=issue.issue_id,
+                issue_type=issue.issue_type,
+                description=issue.description,
+            )
 
     def _ensure_all_roles(self) -> None:
         """确保所有已知角色都有足够数量的 agent 实例。"""

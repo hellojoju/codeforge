@@ -615,9 +615,22 @@ class RalphConfigManager:
             "today_cost": today_cost,
             "daily_cost_limit": cost_limit,
         }
+
+    def update_budget_config(self, config: dict) -> dict:
+        """更新预算配置。"""
+        current = self._read_json(
+            "budget-config.json",
+            {"daily_token_limit": 1_000_000, "daily_cost_limit": 10.0, "enabled": False},
+        )
         current.update(config)
-        self._write_json("budget-config.json", {k: v for k, v in current.items()
-                         if k in ("daily_token_limit", "daily_cost_limit", "enabled")})
+        self._write_json(
+            "budget-config.json",
+            {
+                k: v
+                for k, v in current.items()
+                if k in ("daily_token_limit", "daily_cost_limit", "enabled")
+            },
+        )
         return self.get_budget_config()
 
     def auto_downgrade(self, provider_id: str) -> dict | None:

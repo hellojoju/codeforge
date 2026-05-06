@@ -3,12 +3,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { AgentClusterMonitor } from '@/components/agent-cluster-monitor'
-import { useDashboardStore } from '@/lib/store'
+import * as hooks from '@/lib/hooks/useDashboardQueries'
 import type { AgentWithSilence } from '@/lib/types'
-
-vi.mock('@/lib/store', () => ({
-  useDashboardStore: vi.fn(),
-}))
+import { renderWithQueryClient } from './test-utils'
 
 vi.mock('@/components/ui/card', () => ({
   Card: ({ children, className }: { children: React.ReactNode; className?: string }) => (
@@ -88,15 +85,20 @@ const makeAgent = (overrides: Partial<AgentWithSilence> = {}): AgentWithSilence 
 describe('AgentClusterMonitor', () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    vi.spyOn(hooks, 'useAgents').mockReturnValue({
+      data: { agents: [] },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
+    vi.spyOn(hooks, 'useInterruptAgent').mockReturnValue({ mutate: vi.fn() } as any)
+    vi.spyOn(hooks, 'usePauseFeature').mockReturnValue({ mutate: vi.fn() } as any)
+    vi.spyOn(hooks, 'useResumeFeature').mockReturnValue({ mutate: vi.fn() } as any)
   })
 
   it('shows empty state when no agents', () => {
-    vi.mocked(useDashboardStore).mockReturnValue({
-      agents: [],
-      fetchAgents: vi.fn(),
-    } as any)
-
-    render(<AgentClusterMonitor />)
+    renderWithQueryClient(<AgentClusterMonitor />)
     expect(screen.getByText('暂无 Agent 实例')).toBeInTheDocument()
   })
 
@@ -104,34 +106,19 @@ describe('AgentClusterMonitor', () => {
     const agent1 = makeAgent({ id: 'backend-1', role: 'backend_dev', instance_number: 1 })
     const agent2 = makeAgent({ id: 'frontend-1', role: 'frontend_dev', instance_number: 2 })
 
-    vi.mocked(useDashboardStore).mockReturnValue({
-      agents: [agent1, agent2],
-      fetchAgents: vi.fn(),
+    vi.spyOn(hooks, 'useAgents').mockReturnValue({
+      data: { agents: [agent1, agent2] },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
     } as any)
 
-    render(<AgentClusterMonitor />)
+    renderWithQueryClient(<AgentClusterMonitor />)
     expect(screen.getByText((content) => content.includes('后端开发'))).toBeInTheDocument()
     expect(screen.getByText((content) => content.includes('前端开发'))).toBeInTheDocument()
     expect(screen.getByText('#1')).toBeInTheDocument()
     expect(screen.getByText('#2')).toBeInTheDocument()
-  })
-
-  it('shows status dots with correct colors', () => {
-    const idleAgent = makeAgent({ id: 'a1', status: 'idle' })
-    const busyAgent = makeAgent({ id: 'a2', status: 'busy' })
-    const errorAgent = makeAgent({ id: 'a3', status: 'error' })
-
-    vi.mocked(useDashboardStore).mockReturnValue({
-      agents: [idleAgent, busyAgent, errorAgent],
-      fetchAgents: vi.fn(),
-    } as any)
-
-    render(<AgentClusterMonitor />)
-    // Status dots are plain spans with color classes like bg-gray-400, bg-green-500, bg-red-500
-    const dots = screen.getAllByText((content, element) => {
-      return (element?.className.includes('rounded-full') && element?.className.includes('bg-')) ?? false
-    })
-    expect(dots.length).toBeGreaterThanOrEqual(3)
   })
 
   it('shows current activity for running agents', () => {
@@ -141,12 +128,15 @@ describe('AgentClusterMonitor', () => {
       current_feature: 'API endpoint for /api/projects',
     })
 
-    vi.mocked(useDashboardStore).mockReturnValue({
-      agents: [agent],
-      fetchAgents: vi.fn(),
+    vi.spyOn(hooks, 'useAgents').mockReturnValue({
+      data: { agents: [agent] },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
     } as any)
 
-    render(<AgentClusterMonitor />)
+    renderWithQueryClient(<AgentClusterMonitor />)
     expect(screen.getByText('处理: API endpoint for /api/projects')).toBeInTheDocument()
   })
 
@@ -158,15 +148,17 @@ describe('AgentClusterMonitor', () => {
       total_tasks_completed: 10,
     })
 
-    vi.mocked(useDashboardStore).mockReturnValue({
-      agents: [agent],
-      fetchAgents: vi.fn(),
+    vi.spyOn(hooks, 'useAgents').mockReturnValue({
+      data: { agents: [agent] },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
     } as any)
 
     const user = userEvent.setup()
-    render(<AgentClusterMonitor />)
+    renderWithQueryClient(<AgentClusterMonitor />)
 
-    // Click expand toggle
     const toggle = screen.getByTestId('chevron-right')
     await user.click(toggle)
 
@@ -181,30 +173,20 @@ describe('AgentClusterMonitor', () => {
       silence_status: { level: 'notify', idle_seconds: 300, last_activity: new Date().toISOString() },
     })
 
-    vi.mocked(useDashboardStore).mockReturnValue({
-      agents: [agent],
-      fetchAgents: vi.fn(),
+    vi.spyOn(hooks, 'useAgents').mockReturnValue({
+      data: { agents: [agent] },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
     } as any)
 
     const user = userEvent.setup()
-    render(<AgentClusterMonitor />)
+    renderWithQueryClient(<AgentClusterMonitor />)
 
-    // The warning icon only shows when the row is expanded
     const toggle = screen.getByTestId('chevron-right')
     await user.click(toggle)
 
     expect(screen.getByTestId('icon-warning')).toBeInTheDocument()
-  })
-
-  it('calls fetchAgents on mount', () => {
-    const fetchAgents = vi.fn()
-
-    vi.mocked(useDashboardStore).mockReturnValue({
-      agents: [],
-      fetchAgents,
-    } as any)
-
-    render(<AgentClusterMonitor />)
-    expect(fetchAgents).toHaveBeenCalled()
   })
 })

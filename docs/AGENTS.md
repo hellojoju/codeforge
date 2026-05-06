@@ -52,7 +52,6 @@ Auto-Coding 是一个多 Agent 自动化代码生成平台，通过协调多个 
 |---------|---------|--------|--------|
 | Feature 列表 | StateRepository | ProjectManager / Coordinator | Dashboard, Coordinator, CLI |
 | Agent 实例 | StateRepository | Coordinator | Dashboard |
-| 任务队列 | SQLite `tasks.db` | TaskQueue | AgentPool |
 | 命令 | StateRepository | REST API | Coordinator |
 | 事件 | StateRepository | ProjectManager / Coordinator / API | Dashboard (WebSocket) |
 | 阻塞问题 | StateRepository | Coordinator/Services | Dashboard, CLI |

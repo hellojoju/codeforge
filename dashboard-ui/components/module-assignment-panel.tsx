@@ -1,7 +1,7 @@
 /** 模块分配面板 — 展示各角色 Agent 的模块分配、接口契约和依赖关系。 */
 'use client'
 
-import { useDashboardStore } from '@/lib/store'
+import { useModuleAssignments, useAgents } from '@/lib/hooks/useDashboardQueries'
 import type { ModuleAssignment } from '@/lib/types'
 import { Badge } from '@/components/ui/badge'
 
@@ -32,7 +32,7 @@ const ROLE_ICONS: Record<string, string> = {
 }
 
 export function ModuleAssignmentPanel() {
-  const moduleAssignments = useDashboardStore((s) => s.moduleAssignments)
+  const { data: moduleAssignments = [] } = useModuleAssignments()
 
   if (moduleAssignments.length === 0) {
     return null
@@ -67,7 +67,8 @@ export function ModuleAssignmentPanel() {
 }
 
 function ModuleCard({ assignment }: { assignment: ModuleAssignment }) {
-  const agents = useDashboardStore((s) => s.agents)
+  const { data: agentsData } = useAgents()
+  const agents = agentsData?.agents || []
   const assignedAgent = agents.find((a) => a.id === assignment.assigned_agent_id)
   const statusColor = STATUS_COLORS[assignment.status] || STATUS_COLORS.pending
   const statusLabel = STATUS_LABELS[assignment.status] || assignment.status

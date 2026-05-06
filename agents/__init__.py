@@ -1,5 +1,6 @@
 """Agents包 - 各角色AI工程师"""
 
+import importlib
 from pathlib import Path
 
 from core.ralph_paths import resolve_ralph_dir
@@ -31,10 +32,15 @@ AGENT_REGISTRY = {
 }
 
 
+def _load_config_manager():
+    cfg_mod = importlib.import_module("ralph.config_manager")
+    return getattr(cfg_mod, "RalphConfigManager")
+
+
 def _load_agent_roles() -> dict[str, str]:
     """从配置动态构建角色中文名映射。"""
     try:
-        from ralph.config_manager import RalphConfigManager
+        RalphConfigManager = _load_config_manager()
         cfg = RalphConfigManager(resolve_ralph_dir(Path(project_dir)))
         defs = cfg.list_agent_definitions()
         return {d["role"]: d.get("display_name", d["role"]) for d in defs}
@@ -70,7 +76,7 @@ def get_agent(role: str, project_dir):
 
     # 动态角色：从配置加载
     try:
-        from ralph.config_manager import RalphConfigManager
+        RalphConfigManager = _load_config_manager()
         cfg = RalphConfigManager(resolve_ralph_dir(Path(project_dir)))
         defs = cfg.list_agent_definitions_raw()
         for d in defs:

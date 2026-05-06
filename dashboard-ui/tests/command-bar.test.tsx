@@ -3,7 +3,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { CommandBar } from '@/components/command-bar'
+import * as hooks from '@/lib/hooks/useDashboardQueries'
 import * as sonner from 'sonner'
+import { renderWithQueryClient } from './test-utils'
 
 vi.mock('sonner', () => ({
   toast: {
@@ -12,46 +14,26 @@ vi.mock('sonner', () => ({
   },
 }))
 
-const mockApprove = vi.fn().mockResolvedValue(undefined)
-const mockReject = vi.fn().mockResolvedValue(undefined)
-const mockPause = vi.fn().mockResolvedValue(undefined)
-const mockResume = vi.fn().mockResolvedValue(undefined)
-const mockRetry = vi.fn().mockResolvedValue(undefined)
-const mockSkip = vi.fn().mockResolvedValue(undefined)
-
-const mockStore = {
-  features: [] as any[],
-  approve: mockApprove,
-  reject: mockReject,
-  pause: mockPause,
-  resume: mockResume,
-  retry: mockRetry,
-  skip: mockSkip,
-}
-
-vi.mock('@/lib/store', () => {
-  const fn = vi.fn((selector?: (s: any) => any) => {
-    return selector ? selector(mockStore) : mockStore
-  })
-  ;(fn as any).getState = () => mockStore
-  return { useDashboardStore: fn }
-})
-
 describe('CommandBar', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockStore.features = []
-    mockStore.approve = mockApprove
-    mockStore.reject = mockReject
-    mockStore.pause = mockPause
-    mockStore.resume = mockResume
-    mockStore.retry = mockRetry
-    mockStore.skip = mockSkip
+    vi.spyOn(hooks, 'useFeatures').mockReturnValue({
+      data: [],
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
+    vi.spyOn(hooks, 'useApprove').mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({}) } as any)
+    vi.spyOn(hooks, 'useReject').mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({}) } as any)
+    vi.spyOn(hooks, 'usePauseFeature').mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({}) } as any)
+    vi.spyOn(hooks, 'useResumeFeature').mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({}) } as any)
+    vi.spyOn(hooks, 'useRetryFeature').mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({}) } as any)
+    vi.spyOn(hooks, 'useSkipFeature').mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({}) } as any)
   })
 
   it('renders all command buttons', () => {
-    render(<CommandBar />)
-
+    renderWithQueryClient(<CommandBar />)
     expect(screen.getByText('审批通过')).toBeInTheDocument()
     expect(screen.getByText('驳回')).toBeInTheDocument()
     expect(screen.getByText('暂停')).toBeInTheDocument()
@@ -61,72 +43,97 @@ describe('CommandBar', () => {
   })
 
   it('shows label when no feature is in progress', () => {
-    render(<CommandBar />)
+    renderWithQueryClient(<CommandBar />)
     expect(screen.getByText('PM 指令：')).toBeInTheDocument()
   })
 
   it('calls approve action for in_progress feature', async () => {
-    const feature = { id: 'feat-1', description: 'Test', status: 'in_progress' }
-    mockStore.features = [feature]
+    const approveAsync = vi.fn().mockResolvedValue({})
+    vi.spyOn(hooks, 'useFeatures').mockReturnValue({
+      data: [{ id: 'feat-1', description: 'Test', status: 'in_progress' }],
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
+    vi.spyOn(hooks, 'useApprove').mockReturnValue({ mutateAsync: approveAsync } as any)
 
-    render(<CommandBar />)
+    renderWithQueryClient(<CommandBar />)
     await userEvent.click(screen.getByText('审批通过'))
 
-    expect(mockApprove).toHaveBeenCalledWith('feat-1')
+    expect(approveAsync).toHaveBeenCalledWith('feat-1')
     expect(sonner.toast.success).toHaveBeenCalledWith('命令已发送', { description: '审批通过 操作已提交' })
   })
 
   it('calls reject action for in_progress feature', async () => {
-    const feature = { id: 'feat-1', description: 'Test', status: 'in_progress' }
-    mockStore.features = [feature]
+    const rejectAsync = vi.fn().mockResolvedValue({})
+    vi.spyOn(hooks, 'useFeatures').mockReturnValue({
+      data: [{ id: 'feat-1', description: 'Test', status: 'in_progress' }],
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
+    vi.spyOn(hooks, 'useReject').mockReturnValue({ mutateAsync: rejectAsync } as any)
 
-    render(<CommandBar />)
+    renderWithQueryClient(<CommandBar />)
     await userEvent.click(screen.getByText('驳回'))
-
-    expect(mockReject).toHaveBeenCalledWith('feat-1')
+    expect(rejectAsync).toHaveBeenCalledWith('feat-1')
   })
 
   it('shows loading state during action', async () => {
     let resolvePromise: () => void
-    const approve = vi.fn().mockImplementation(
+    const approveAsync = vi.fn().mockImplementation(
       () => new Promise<void>((resolve) => { resolvePromise = resolve })
     )
-    const feature = { id: 'feat-1', description: 'Test', status: 'in_progress' }
-    mockStore.features = [feature]
-    mockStore.approve = approve
+    vi.spyOn(hooks, 'useFeatures').mockReturnValue({
+      data: [{ id: 'feat-1', description: 'Test', status: 'in_progress' }],
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
+    vi.spyOn(hooks, 'useApprove').mockReturnValue({ mutateAsync: approveAsync } as any)
 
-    render(<CommandBar />)
+    renderWithQueryClient(<CommandBar />)
     fireEvent.click(screen.getByText('审批通过'))
 
-    // The button should show loading state
     expect(screen.getByText('发送中...')).toBeInTheDocument()
     expect(screen.getByText('驳回')).toBeDisabled()
 
-    // Resolve the promise to clean up
     resolvePromise!()
-    await vi.waitFor(() => {
-      expect(mockApprove).not.toHaveBeenCalled() // approve was replaced, so this won't be called
-    })
   })
 
   it('shows error toast on failure', async () => {
-    const approve = vi.fn().mockRejectedValue(new Error('Network error'))
-    const feature = { id: 'feat-1', description: 'Test', status: 'in_progress' }
-    mockStore.features = [feature]
-    mockStore.approve = approve
+    const approveAsync = vi.fn().mockRejectedValue(new Error('Network error'))
+    vi.spyOn(hooks, 'useFeatures').mockReturnValue({
+      data: [{ id: 'feat-1', description: 'Test', status: 'in_progress' }],
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
+    vi.spyOn(hooks, 'useApprove').mockReturnValue({ mutateAsync: approveAsync } as any)
 
-    render(<CommandBar />)
+    renderWithQueryClient(<CommandBar />)
     await userEvent.click(screen.getByText('审批通过'))
 
     expect(sonner.toast.error).toHaveBeenCalledWith('发送失败', { description: 'Network error' })
   })
 
   it('uses pm as target when no feature is in progress', async () => {
-    mockStore.features = [{ id: 'f1', description: 'Test', status: 'done' }]
+    const approveAsync = vi.fn().mockResolvedValue({})
+    vi.spyOn(hooks, 'useFeatures').mockReturnValue({
+      data: [{ id: 'f1', description: 'Test', status: 'done' }],
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any)
+    vi.spyOn(hooks, 'useApprove').mockReturnValue({ mutateAsync: approveAsync } as any)
 
-    render(<CommandBar />)
+    renderWithQueryClient(<CommandBar />)
     await userEvent.click(screen.getByText('审批通过'))
-
-    expect(mockApprove).toHaveBeenCalledWith('pm')
+    expect(approveAsync).toHaveBeenCalledWith('pm')
   })
 })

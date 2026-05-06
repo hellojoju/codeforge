@@ -344,6 +344,40 @@ def plan(
 
 
 @app.command()
+def unblock(
+    issue_id: str = typer.Argument(..., help="阻塞问题的 issue_id"),
+    directory: str = typer.Option("./project", "-d", "--dir", help="项目目录"),
+) -> None:
+    """解除指定的阻塞问题"""
+    project_dir = Path(directory).resolve()
+    _validate_project_dir(project_dir)
+
+    from core.blocking_tracker import BlockingTracker
+    from dashboard.state_repository import ProjectStateRepository
+
+    state_dir = project_dir / "data" / "dashboard"
+    repo = ProjectStateRepository(base_dir=state_dir, project_id=str(project_dir.name))
+    tracker = BlockingTracker(repo)
+
+    issue = tracker.get_issue(issue_id)
+    if issue is None:
+        console.print(f"[red]阻塞问题不存在: {issue_id}[/red]")
+        raise typer.Exit(1)
+    if issue.resolved:
+        console.print(f"[yellow]阻塞问题已解决: {issue_id}[/yellow]")
+        return
+
+    success = tracker.resolve_issue(issue_id, resolution="人工解除")
+    if success:
+        console.print(f"[green]阻塞问题已解除: {issue_id}[/green]")
+        console.print(f"  类型: {issue.issue_type}")
+        console.print(f"  关联: {issue.feature_id}")
+    else:
+        console.print(f"[red]解除失败: {issue_id}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
 def blocked(
     directory: str = typer.Option("./project", "-d", "--dir", help="项目目录"),
 ) -> None:
@@ -463,7 +497,7 @@ def dashboard(
         project_id=str(project_dir.name),
         run_id="dashboard-standalone",
     )
-    pm = ProjectManager(project_dir) if project_dir.exists() else None
+    pm = ProjectManager(project_dir, event_bus=event_bus) if project_dir.exists() else None
     coordinator = PMCoordinator(pm, repository, event_bus) if pm and pm._initialized else None
     fastapi_app = create_dashboard_app(event_bus, repository, coordinator, product_manager=pm)
 

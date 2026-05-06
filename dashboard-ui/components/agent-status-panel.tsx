@@ -8,11 +8,12 @@ import {
   SILENCE_LEVEL_COLORS,
   AGENT_STATUS_LABELS,
 } from '@/lib/types'
-import { useDashboardStore } from '@/lib/store'
+import { useAgents, useInterruptAgent, useSendAgentMessage } from '@/lib/hooks/useDashboardQueries'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
   MessageSquare,
@@ -46,10 +47,9 @@ const STATUS_DOT: Record<string, string> = {
 }
 
 export function AgentStatusPanel() {
-  const { agentDetails, fetchAgents, fetchEvents } = useDashboardStore()
+  const { data: agentsData } = useAgents()
+  const agents = agentsData?.agents || []
   const [expandedRoles, setExpandedRoles] = useState<Record<string, boolean>>({})
-
-  const agents = Array.from(agentDetails.values())
 
   const roleGroups = agents.reduce<Record<string, AgentWithSilence[]>>((acc, a) => {
     const role = a.role || 'unknown'
@@ -62,9 +62,10 @@ export function AgentStatusPanel() {
     setExpandedRoles((prev) => ({ ...prev, [role]: !(prev[role] ?? true) }))
   }
 
+  const qc = useQueryClient()
   const refreshAll = () => {
-    fetchAgents()
-    fetchEvents()
+    qc.invalidateQueries({ queryKey: ['agents'] })
+    qc.invalidateQueries({ queryKey: ['events'] })
   }
 
   return (
@@ -120,7 +121,8 @@ export function AgentStatusPanel() {
 }
 
 function AgentCard({ agent }: { agent: AgentWithSilence }) {
-  const { interruptAgent, sendMessage } = useDashboardStore()
+  const interruptMutation = useInterruptAgent()
+  const sendMessageMutation = useSendAgentMessage()
   const [showActions, setShowActions] = useState(false)
 
   const status = agent.status as string
@@ -200,7 +202,7 @@ function AgentCard({ agent }: { agent: AgentWithSilence }) {
               variant="outline"
               size="sm"
               className="h-6 text-[10px] px-2 gap-1"
-              onClick={() => interruptAgent(agent.id)}
+              onClick={() => interruptMutation.mutate({ agentId: agent.id })}
             >
               <StopCircle className="h-3 w-3" />
               中断
@@ -211,7 +213,7 @@ function AgentCard({ agent }: { agent: AgentWithSilence }) {
               className="h-6 text-[10px] px-2 gap-1"
               onClick={() => {
                 const msg = prompt('输入要发送给 Agent 的消息:')
-                if (msg) sendMessage(agent.id, msg)
+                if (msg) sendMessageMutation.mutate({ agentId: agent.id, message: msg })
               }}
             >
               <MessageSquare className="h-3 w-3" />

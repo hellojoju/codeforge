@@ -432,10 +432,10 @@ Command = “approve / reject / pause / resume”
 
 当前事实分散：
 
-- `FeatureTracker` 持有 Feature 状态
-- `TaskQueue` 持有 Task 状态
-- `ProjectStateRepository` 持有 commands/events/agents/features/chat/module_assignments
-- `progress_logger` 再记录一份文本轨迹
+- `FeatureTracker` 持有 Feature 状态的只读排序视图
+- `ProjectStateRepository` 是统一状态源（commands/events/agents/features/chat/module_assignments/blocking_issues）
+- ~~`TaskQueue` 持有 Task 状态~~ — 已删除，任务调度统一走 Repository
+- ~~`progress_logger` 再记录一份文本轨迹~~ — 已委托 repository 写入
 
 这会导致：
 
@@ -509,24 +509,9 @@ Command = “approve / reject / pause / resume”
 - 避免双写
 - 避免一个状态先改 `features.json` 再改 `state.json`
 
-### 8.6 功能点：重新定位 `TaskQueue`
+### ~~8.6 功能点：重新定位 `TaskQueue`~~ — 已完成
 
-**目标**
-
-- 不再让 SQLite `TaskQueue` 成为“孤立任务系统”
-
-**改造方向**
-
-方案 A，推荐：
-
-- 保留队列调度能力
-- 把任务事实源迁到 Repository
-- `TaskQueue` 只负责任务领取次序和并发控制
-
-具体意思是：
-
-- Task 的定义、状态、错误、结果，最终存 Repository
-- Queue 只负责“谁先执行”
+> `TaskQueue` 已删除。任务调度统一通过 `ProjectStateRepository` 管理，不再需要独立的队列层。原计划中的”任务事实源迁到 Repository”已完成。
 
 ### 8.7 功能点：统一状态流转入口
 

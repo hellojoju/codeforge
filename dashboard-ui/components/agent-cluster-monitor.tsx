@@ -1,13 +1,13 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
-import { useDashboardStore } from '@/lib/store'
+import { useAgents, useInterruptAgent, usePauseFeature, useResumeFeature } from '@/lib/hooks/useDashboardQueries'
 import type { AgentWithSilence } from '@/lib/types'
 import { SILENCE_LEVEL_LABELS, SILENCE_LEVEL_COLORS } from '@/lib/types'
 import { Pause, RotateCcw, Zap, Cpu, Clock, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react'
@@ -50,7 +50,9 @@ const STATUS_COLORS: Record<string, string> = {
 }
 
 function AgentRow({ agent }: { agent: AgentWithSilence }) {
-  const { pause, resume, interruptAgent } = useDashboardStore()
+  const pauseMutation = usePauseFeature()
+  const resumeMutation = useResumeFeature()
+  const interruptMutation = useInterruptAgent()
   const [expanded, setExpanded] = useState(false)
 
   const roleLabel = ROLE_LABELS[agent.role] || agent.role
@@ -103,7 +105,7 @@ function AgentRow({ agent }: { agent: AgentWithSilence }) {
               size="icon"
               variant="ghost"
               className="h-6 w-6"
-              onClick={() => pause(agent.id)}
+              onClick={() => pauseMutation.mutate(agent.id)}
             >
               <Pause className="h-3 w-3" />
             </Button>
@@ -113,7 +115,7 @@ function AgentRow({ agent }: { agent: AgentWithSilence }) {
               size="icon"
               variant="ghost"
               className="h-6 w-6"
-              onClick={() => resume(agent.id)}
+              onClick={() => resumeMutation.mutate(agent.id)}
             >
               <RotateCcw className="h-3 w-3" />
             </Button>
@@ -123,7 +125,7 @@ function AgentRow({ agent }: { agent: AgentWithSilence }) {
               size="icon"
               variant="ghost"
               className="h-6 w-6 text-destructive hover:text-destructive"
-              onClick={() => interruptAgent(agent.id)}
+              onClick={() => interruptMutation.mutate({ agentId: agent.id })}
             >
               <Zap className="h-3 w-3" />
             </Button>
@@ -165,11 +167,8 @@ function AgentRow({ agent }: { agent: AgentWithSilence }) {
 }
 
 export function AgentClusterMonitor() {
-  const { agents, fetchAgents } = useDashboardStore()
-
-  useEffect(() => {
-    fetchAgents()
-  }, [fetchAgents])
+  const { data: agentsData } = useAgents()
+  const agents = agentsData?.agents || []
 
   const grouped = agents.reduce<Record<string, AgentWithSilence[]>>((acc, agent) => {
     const role = agent.role || 'unknown'
