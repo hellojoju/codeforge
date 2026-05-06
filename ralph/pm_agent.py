@@ -9,6 +9,11 @@ from ralph.context_engine import ContextEngine, ContextLayer
 from ralph.repository import RalphRepository
 from ralph.schema.work_unit import WorkUnitStatus
 
+try:
+    from ralph.retrieval_pipeline import RetrievalPipeline
+except ImportError:
+    RetrievalPipeline = None
+
 
 @dataclass
 class AgentResult:
@@ -49,6 +54,11 @@ class PMAgent:
         self._engine = engine
         self._repo = RalphRepository(self._project_dir / ".ralph")
         self._context_engine = ContextEngine(self._project_dir)
+        ralph_dir = self._project_dir / ".ralph"
+        if RetrievalPipeline is not None and ralph_dir.is_dir():
+            self._retrieval = RetrievalPipeline(ralph_dir)
+        else:
+            self._retrieval = None
 
     def get_status(self) -> dict[str, Any]:
         units = self._repo.list_work_units()
@@ -121,6 +131,15 @@ class PMAgent:
                 ))
                 continue
 
+            # Retrieve historical context if available
+            historical_context = []
+            if self._retrieval is not None and candidate.title:
+                try:
+                    retrieval_results = self._retrieval.search_semantic(candidate.title, top_k=5)
+                    historical_context = [r.to_dict() for r in retrieval_results]
+                except Exception as e:
+                    logger.warning("RetrievalPipeline search failed for %s: %s", candidate.work_id, e)
+
             # Build context based on mode
             if mode == "empty_memory":
                 ctx = self._context_engine.build_initial(
@@ -133,9 +152,26 @@ class PMAgent:
                     layers={ContextLayer.L0, ContextLayer.L1, ContextLayer.L2, ContextLayer.L3},
                 )
 
-            # Execute
+            # Inject historical context
+            if historical_context:
+                ctx["historical_context"] = historical_context
+
+            # Execute — adapt to engine signature
             try:
-                result = await self._engine.execute(candidate.work_id, context=ctx)
+                import inspect
+                sig = inspect.signature(self._engine.execute)
+                if "context" in sig.parameters:
+                    result = await self._engine.execute(candidate.work_id, context=ctx)
+                elif "runner" in sig.parameters:
+                    # TurnBasedExecutionEngine: (work_id, *, max_turns, runner, context_engine)
+                    result = await self._engine.execute(
+                        candidate.work_id,
+                        runner=self._engine,
+                        context_engine=self._context_engine,
+                        max_turns=10,
+                    )
+                else:
+                    result = await self._engine.execute(candidate.work_id)
             except Exception as e:
                 results.append(AgentResult(
                     action="dispatch",

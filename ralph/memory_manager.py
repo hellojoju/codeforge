@@ -132,10 +132,53 @@ class MemoryManager:
         result.sort(key=lambda x: x["score"], reverse=True)
         return result[: max(1, top_k)]
 
-    def get_l1_snapshot(self, active_work_units: list[dict[str, Any]]) -> dict[str, Any]:
+    def get_l1_snapshot(self, active_work_units: list[dict[str, Any]],
+                        archiver: Any = None) -> dict[str, Any]:
+        """生成 PM Agent 的 L1 状态层快照。
+
+        包含：活跃任务列表、近期摘要、阻塞项、关键决策、偏好上下文。
+        目标大小 <2k tokens。
+        """
+        # 近期摘要来自短期记忆
+        recent_summaries = []
+        if archiver is not None and hasattr(archiver, "get_short_term"):
+            short = archiver.get_short_term()
+            recent_summaries = [
+                {"work_id": e.get("work_id", ""), "status": e.get("status", ""),
+                 "summary": e.get("summary", "")}
+                for e in short[-10:]
+            ]
+
+        # 活跃阻塞项
+        blockers = []
+        try:
+            for wu in self._repo.list_work_units():
+                if getattr(wu, "status", None) and str(wu.status) == "blocked":
+                    blockers.append({
+                        "work_id": getattr(wu, "work_id", ""),
+                        "title": getattr(wu, "target", getattr(wu, "title", "")),
+                        "error": getattr(wu, "error", ""),
+                    })
+        except Exception:
+            pass
+
+        # 关键决策来自中期记忆
+        key_decisions = []
+        if archiver is not None and hasattr(archiver, "get_medium_term"):
+            medium = archiver.get_medium_term()
+            key_decisions = [
+                {"decision": d.get("decision", ""), "context": d.get("context", ""),
+                 "recorded_at": d.get("recorded_at", "")}
+                for d in medium[-5:]
+                if d.get("type") == "decision"
+            ]
+
         return {
             "active_count": len(active_work_units),
             "active_work_units": active_work_units[:20],
+            "recent_summaries": recent_summaries,
+            "blockers": blockers,
+            "key_decisions": key_decisions,
             "top_tastes": self._taste.get_all()[:10],
             "generated_at": _now_iso(),
         }

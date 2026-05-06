@@ -5,6 +5,11 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ralph.compaction_agent import CompactedSummary
+    from ralph.config_manager import RalphConfigManager
 
 
 def _now_iso() -> str:
@@ -22,10 +27,11 @@ class MemoryArchiver:
     SHORT_TERM_MAX = 20
     MEDIUM_TERM_MAX = 100
 
-    def __init__(self, ralph_dir: Path):
+    def __init__(self, ralph_dir: Path, config: "RalphConfigManager | None" = None):
         self._dir = ralph_dir / "memory"
         self._dir.mkdir(parents=True, exist_ok=True)
         (self._dir / "long_term").mkdir(exist_ok=True)
+        self._config = config
 
     # --- Short-term ---
 
@@ -146,22 +152,43 @@ class MemoryArchiver:
 
     # --- Terminal Compaction ---
 
-    def compact_on_terminal(self, work_id: str, final_state: dict) -> str:
+    def compact_on_terminal(self, work_id: str, final_state: dict,
+                            full_log: str = "") -> str:
         """任务到达终端状态时自动归档。返回归档路径。"""
-        summary = self._compress_to_summary(final_state)
+        # LLM 压缩（如果可用）生成结构化摘要；否则降级为规则压缩
+        summary = self._compress_to_summary(final_state, full_log)
+        # 存入长期记忆
         self.archive_compressed_summary(work_id, summary)
-        self.archive_task_log(work_id, json.dumps(final_state, indent=2))
+        self.archive_task_log(work_id, full_log or json.dumps(final_state, indent=2))
+        # 短期记忆追加
+        short_entry = {
+            "work_id": work_id,
+            "title": final_state.get("target", final_state.get("title", work_id)),
+            "status": final_state.get("status", ""),
+            "summary": summary.get("summary", ""),
+            "key_decisions": summary.get("key_decisions", []),
+            "risks_introduced": summary.get("risks_introduced", []),
+            "compressed_at": summary.get("compressed_at", _now_iso()),
+        }
+        self.append_short_term(short_entry)
         return str(self._dir / "long_term" / _now_iso()[:10] / f"{work_id}.summary.json")
 
-    def _compress_to_summary(self, final_state: dict) -> dict:
-        """将完整状态压缩为摘要。"""
-        return {
-            "work_id": final_state.get("work_id", ""),
-            "status": final_state.get("status", ""),
-            "summary": final_state.get("summary", final_state.get("target", ""))[:500],
-            "completed_at": final_state.get("completed_at", _now_iso()),
-            "key_outcomes": final_state.get("key_outcomes", []),
-        }
+    def _compress_to_summary(self, final_state: dict, full_log: str = "") -> dict:
+        """使用 CompactionAgent 将完整状态压缩为结构化摘要。"""
+        from ralph.compaction_agent import CompactionAgent
+
+        work_id = final_state.get("work_id", "")
+        status = final_state.get("status", "")
+        executor_summary = final_state.get("summary", final_state.get("target", ""))
+
+        agent = CompactionAgent(self._config)
+        result = agent.compact(
+            work_id=work_id,
+            full_log=full_log or json.dumps(final_state, indent=2),
+            status=str(status),
+            executor_summary=str(executor_summary)[:500],
+        )
+        return _compact_summary_to_dict(result)
 
     # --- Internal ---
 
@@ -193,3 +220,20 @@ class MemoryArchiver:
         (self._dir / filename).write_text(
             json.dumps(data, indent=2, ensure_ascii=False, default=str),
         )
+
+
+def _compact_summary_to_dict(s: "CompactedSummary") -> dict:
+    """将 CompactedSummary dataclass 转为普通 dict。"""
+    return {
+        "work_id": s.work_id,
+        "summary": s.summary,
+        "status": s.status,
+        "key_decisions": s.key_decisions,
+        "files_changed": s.files_changed,
+        "interfaces_modified": s.interfaces_modified,
+        "risks_introduced": s.risks_introduced,
+        "downstream_impact": s.downstream_impact,
+        "evidence_refs": s.evidence_refs,
+        "lessons_learned": s.lessons_learned,
+        "compressed_at": s.compressed_at,
+    }

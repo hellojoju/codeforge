@@ -180,6 +180,9 @@ def create_dashboard_app(
     app.state.event_bus = event_bus
     app.state.ralph_capabilities = _build_capabilities()
 
+    # Resolve project_dir uniformly at function scope top
+    project_dir = Path(os.environ.get("PROJECT_DIR", ".")).resolve()
+
     @app.exception_handler(ModuleNotFoundError)
     async def _module_not_found_handler(_, exc: ModuleNotFoundError) -> JSONResponse:
         # 显式降级缺失能力，避免调用端点时抛 500。
@@ -194,21 +197,20 @@ def create_dashboard_app(
             )
         return JSONResponse(status_code=500, content={"detail": str(exc)})
 
+    # 统一解析项目目录（单一事实源）
+    project_dir = Path(os.environ.get("PROJECT_DIR", ".")).resolve()
+
     # 注入 RalphRepository
     if ralph_repository is None:
         from core.ralph_paths import resolve_ralph_dir
-        project_dir = Path(os.environ.get("PROJECT_DIR", ".")).resolve()
         ralph_dir = resolve_ralph_dir(project_dir)
         ralph_repository = RalphRepository(ralph_dir)
     app.state.ralph_repository = ralph_repository
 
     # 注入 WorkUnitEngine（如果未提供则从 project_dir 初始化）
     if ralph_engine is None:
-        project_dir_env = os.environ.get("PROJECT_DIR")
-        if project_dir_env:
-            from ralph.work_unit_engine import WorkUnitEngine
-
-            ralph_engine = WorkUnitEngine(Path(project_dir_env))
+        from ralph.work_unit_engine import WorkUnitEngine
+        ralph_engine = WorkUnitEngine(project_dir)
     app.state.ralph_engine = ralph_engine
 
     # 注入 ReportGenerator
@@ -2197,7 +2199,6 @@ def _write_claude_md(path: Path, name: str) -> None:
     app.include_router(feature_router)
     app.include_router(register_ralph_extended_routes(app))
 
-    return app
     return app
 
 

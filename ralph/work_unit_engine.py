@@ -60,7 +60,7 @@ class WorkUnitEngine:
         self._config_mgr = RalphConfigManager(self._ralph_dir)
         self._event_bus = event_bus
         self._memory = memory_manager or MemoryManager(self._ralph_dir, project_dir=self._project_dir)
-        self._archiver = MemoryArchiver(self._ralph_dir)
+        self._archiver = MemoryArchiver(self._ralph_dir, config=self._config_mgr)
         # 知识图谱 — 用于查询历史教训
         try:
             from ralph.knowledge_graph import KnowledgeGraphService
@@ -85,7 +85,13 @@ class WorkUnitEngine:
 
             self._memory.on_work_unit_completed(unit_dict, exec_log)
             # 触发 MemoryArchiver 自动压缩
-            self._archiver.compact_on_terminal(work_id, unit_dict)
+            self._archiver.compact_on_terminal(work_id, unit_dict, full_log=exec_log)
+            # 索引到知识图谱
+            if self._knowledge_graph is not None:
+                try:
+                    self._knowledge_graph.index_work_unit(unit_dict, exec_log=exec_log)
+                except Exception as e:
+                    logger.warning("KnowledgeGraph index failed for %s: %s", work_id, e)
             # 触发反思回顾
             retro_result = self._memory.trigger_retro(unit_dict, exec_log)
             # 自动调参
