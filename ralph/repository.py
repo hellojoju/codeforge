@@ -62,7 +62,8 @@ class RalphRepository:
         self._reviews_dir = self._ralph_dir / "reviews"
         self._blockers_dir = self._ralph_dir / "blockers"
         self._retros_dir = self._ralph_dir / "retros"
-        for d in [self._work_units_dir, self._evidence_dir, self._reviews_dir, self._blockers_dir, self._retros_dir]:
+        self._pipeline_contexts_dir = self._ralph_dir / "pipeline_contexts"
+        for d in [self._work_units_dir, self._evidence_dir, self._reviews_dir, self._blockers_dir, self._retros_dir, self._pipeline_contexts_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
         # 统一状态存储（JSON Lines）
@@ -234,6 +235,36 @@ class RalphRepository:
             if work_id is not None and data.get("work_id") != work_id:
                 continue
             items.append(self._deserialize_retro(data))
+            if len(items) >= limit:
+                break
+        return items
+
+    # ── PipelineContext ───────────────────────────────────────
+
+    def save_pipeline_context(self, ctx_id: str, data: dict) -> Path:
+        """保存 PipelineContext（原子写入）。"""
+        payload = {
+            "ctx_id": ctx_id,
+            "created_at": _now_iso(),
+            **data,
+        }
+        path = self._pipeline_contexts_dir / f"{ctx_id}.json"
+        self._atomic_write(path, payload)
+        logger.info("保存 PipelineContext: %s", ctx_id)
+        return path
+
+    def get_pipeline_context(self, ctx_id: str) -> dict | None:
+        """读取 PipelineContext。"""
+        path = self._pipeline_contexts_dir / f"{ctx_id}.json"
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def list_pipeline_contexts(self, limit: int = 50) -> list[dict]:
+        """列出 PipelineContext，按文件名倒序。"""
+        items = []
+        for path in sorted(self._pipeline_contexts_dir.glob("*.json"), reverse=True):
+            items.append(json.loads(path.read_text(encoding="utf-8")))
             if len(items) >= limit:
                 break
         return items

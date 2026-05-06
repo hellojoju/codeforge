@@ -144,6 +144,25 @@ class MemoryArchiver:
             "last_updated": _now_iso(),
         }
 
+    # --- Terminal Compaction ---
+
+    def compact_on_terminal(self, work_id: str, final_state: dict) -> str:
+        """任务到达终端状态时自动归档。返回归档路径。"""
+        summary = self._compress_to_summary(final_state)
+        self.archive_compressed_summary(work_id, summary)
+        self.archive_task_log(work_id, json.dumps(final_state, indent=2))
+        return str(self._dir / "long_term" / _now_iso()[:10] / f"{work_id}.summary.json")
+
+    def _compress_to_summary(self, final_state: dict) -> dict:
+        """将完整状态压缩为摘要。"""
+        return {
+            "work_id": final_state.get("work_id", ""),
+            "status": final_state.get("status", ""),
+            "summary": final_state.get("summary", final_state.get("target", ""))[:500],
+            "completed_at": final_state.get("completed_at", _now_iso()),
+            "key_outcomes": final_state.get("key_outcomes", []),
+        }
+
     # --- Internal ---
 
     def _read_short_term(self) -> list[dict]:

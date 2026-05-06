@@ -29,6 +29,7 @@ from ralph.evidence_collector import EvidenceCollector
 from ralph.guard_coordinator import GuardCoordinator
 from ralph.harness_manager import HarnessManager
 from ralph.memory_manager import MemoryManager
+from ralph.memory_archiver import MemoryArchiver
 from ralph.repository import RalphRepository
 from ralph.review_manager import ReviewManager, ReviewRequest
 from ralph.schema.review_result import ReviewResult
@@ -59,6 +60,7 @@ class WorkUnitEngine:
         self._config_mgr = RalphConfigManager(self._ralph_dir)
         self._event_bus = event_bus
         self._memory = memory_manager or MemoryManager(self._ralph_dir, project_dir=self._project_dir)
+        self._archiver = MemoryArchiver(self._ralph_dir)
         # 知识图谱 — 用于查询历史教训
         try:
             from ralph.knowledge_graph import KnowledgeGraphService
@@ -82,6 +84,8 @@ class WorkUnitEngine:
             unit_dict["status"] = unit.status.value
 
             self._memory.on_work_unit_completed(unit_dict, exec_log)
+            # 触发 MemoryArchiver 自动压缩
+            self._archiver.compact_on_terminal(work_id, unit_dict)
             # 触发反思回顾
             retro_result = self._memory.trigger_retro(unit_dict, exec_log)
             # 自动调参
