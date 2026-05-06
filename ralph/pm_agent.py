@@ -171,12 +171,12 @@ class PMAgent:
         blockers: list[str] = []
 
         # Check explicit dependencies from work unit
-        depends_on = getattr(work_unit, "depends_on", []) or []
+        depends_on = getattr(work_unit, "dependencies", []) or []
         for dep_id in depends_on:
             dep_wu = self._repo.get_work_unit(dep_id)
             if dep_wu is None:
                 blockers.append(f"dependency {dep_id} not found")
-            elif dep_wu.status not in (WorkUnitStatus.COMPLETED, WorkUnitStatus.APPROVED):
+            elif dep_wu.status not in (WorkUnitStatus.ACCEPTED,):
                 blockers.append(f"dependency {dep_id} is {dep_wu.status.value}")
 
         # Check blockers
@@ -202,7 +202,7 @@ class PMAgent:
                 return False
 
         # Check if already completed
-        if work_unit.status in (WorkUnitStatus.COMPLETED, WorkUnitStatus.APPROVED):
+        if work_unit.status in (WorkUnitStatus.ACCEPTED,):
             return False
 
         return True

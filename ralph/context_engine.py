@@ -298,12 +298,12 @@ class ContextEngine:
             removed = outputs.pop(0)
             total_tokens -= removed.token_count
 
-        sections: dict[str, str] = {}
+        sections: dict[str, list[str]] = {}
         for output in outputs:
-            sections[output.layer.value] = output.content
+            sections.setdefault(output.layer.value, []).append(output.content)
 
         return {
-            "layers": sections,
+            "layers": {k: "\n\n".join(v) for k, v in sections.items()},
             "total_tokens_estimated": total_tokens,
             "budget": budget.max_tokens,
             "trimmed": total_tokens < sum(o.token_count for o in outputs),

@@ -133,7 +133,7 @@ class AnalysisPipeline:
             logger.warning("Graphify/KG sync failed: %s", e)
 
         # Step 6: Retrieval for context
-        retrieval = RetrievalPipeline(self._ralph_dir).search(prd_text[:120], top_k=20)
+        retrieval = RetrievalPipeline(self._ralph_dir).fusion_search(prd_text[:120], top_k=20)
 
         # Build result
         think_result = {

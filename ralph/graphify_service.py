@@ -105,10 +105,14 @@ class GraphifyService:
         count = 0
         for node in graph.get("nodes", []):
             node_id = node.get("id", "")
-            label = node.get("label", node_id)
             if not node_id:
                 continue
-            kg.add_node(node_id, label=label, node_type="file", **node)
+            # Avoid duplicate keys: extract known keys, pass rest as metadata
+            node_kwargs = {
+                k: v for k, v in node.items()
+                if k not in ("id", "label", "type")
+            }
+            kg.add_node(node_id, label=node.get("label", node_id), node_type="file", **node_kwargs)
             count += 1
 
         for edge in graph.get("edges", []):
