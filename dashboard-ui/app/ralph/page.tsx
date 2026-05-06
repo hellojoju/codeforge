@@ -1,7 +1,9 @@
 'use client';
 
+import { useCallback } from 'react';
 import { useRalphStore } from '@/lib/ralph-store';
 import { WorkUnitList } from '@/components/ralph/work-unit-list';
+import { RunStatusHeader } from '@/components/ralph/run-status-header';
 import { statusLabel, statusColor, formatDate } from '@/lib/ralph-utils';
 import {
   LayoutDashboard, ListTodo, ShieldCheck, AlertTriangle, Activity,
@@ -9,9 +11,27 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
-import type { RalphEvent, WorkUnitStatus } from '@/lib/ralph-types';
+import type { RalphEvent, WorkUnitStatus, RunStatus } from '@/lib/ralph-types';
 
 const ORDERED_STATUSES: WorkUnitStatus[] = ['running', 'needs_review', 'accepted', 'needs_rework', 'blocked', 'failed', 'ready', 'draft'];
+
+/** 将 RunStatus API 响应映射为 RunStatusHeader 期望的扁平结构 */
+function adaptRunStatus(rs: RunStatus | null) {
+  if (!rs) return null;
+  const { status_counts: counts } = rs;
+  return {
+    running: counts.running ?? 0,
+    needs_review: counts.needs_review ?? 0,
+    blocked: counts.blocked ?? 0,
+    accepted: counts.accepted ?? 0,
+    failed: counts.failed ?? 0,
+    next_action: rs.unresolved_blockers > 0
+      ? `还有 ${rs.unresolved_blockers} 个阻塞项需要关注`
+      : rs.success_rate_percent < 80
+        ? `成功率偏低 (${rs.success_rate_percent}%) — 建议检查失败任务`
+        : null,
+  };
+}
 
 const EVENT_TYPE_LABELS: Record<string, string> = {
   work_unit_created: 'WorkUnit 创建',
@@ -165,8 +185,10 @@ function SidePanel() {
   const { workUnits, connected, currentProject } = useRalphStore();
 
   const counts: Record<string, number> = {};
+  let total = 0;
   for (const wu of workUnits) {
     counts[wu.status] = (counts[wu.status] || 0) + 1;
+    total++;
   }
 
   return (
@@ -205,30 +227,40 @@ function SidePanel() {
         )}
       </div>
 
-      {/* 状态分布 */}
+      {/* 状态分布 — 水平进度条 */}
       <div className="rounded-lg border border-slate-200 bg-white p-4">
         <div className="flex items-center gap-2 mb-3">
           <div className="h-1.5 w-1.5 rounded-full bg-slate-400" />
           <span className="text-xs font-medium text-slate-600">状态分布</span>
         </div>
-        <div className="space-y-1.5">
-          {ORDERED_STATUSES.filter((s) => (counts[s] || 0) > 0).length === 0 && (
-            <span className="text-xs text-slate-400">暂无数据</span>
-          )}
-          {ORDERED_STATUSES.map((status) => {
-            const count = counts[status] || 0;
-            if (count === 0) return null;
-            return (
-              <div key={status} className="flex items-center justify-between rounded-md px-2.5 py-1.5 bg-slate-50/50">
-                <div className="flex items-center gap-2">
-                  <span className={cn('h-1.5 w-1.5 rounded-full', statusColor(status))} />
-                  <span className="text-xs text-slate-600">{statusLabel(status)}</span>
+        {ORDERED_STATUSES.filter((s) => (counts[s] || 0) > 0).length === 0 ? (
+          <span className="text-xs text-slate-400">暂无数据</span>
+        ) : (
+          <div className="space-y-2">
+            {ORDERED_STATUSES.map((status) => {
+              const count = counts[status] || 0;
+              if (count === 0) return null;
+              const percentage = total > 0 ? Math.round((count / total) * 100) : 0;
+              return (
+                <div key={status}>
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className={cn('h-1.5 w-1.5 rounded-full', statusColor(status))} />
+                      <span className="text-xs text-slate-600">{statusLabel(status)}</span>
+                    </div>
+                    <span className="text-xs font-semibold text-slate-800">{count}</span>
+                  </div>
+                  <div className="h-1 w-full rounded-full bg-slate-100 overflow-hidden">
+                    <div
+                      className={cn('h-full rounded-full transition-all duration-300', statusColor(status))}
+                      style={{ width: `${Math.max(percentage, 4)}%` }}
+                    />
+                  </div>
                 </div>
-                <span className="text-xs font-semibold text-slate-800">{count}</span>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <RecentActivity />
@@ -239,7 +271,14 @@ function SidePanel() {
 // ==================== Main Page ====================
 
 export default function RalphPage() {
-  const { currentProject } = useRalphStore();
+  const { currentProject, runStatus, connected, loading, fetchSummary, pendingActions, blockers, pendingCommandCount } = useRalphStore();
+
+  const handleRefresh = useCallback(() => {
+    fetchSummary();
+  }, [fetchSummary]);
+
+  const unresolvedBlockers = blockers.filter((b) => !b.resolved).length;
+  const pendingCount = pendingActions.length;
 
   if (!currentProject) {
     return <WelcomeScreen />;
@@ -252,8 +291,61 @@ export default function RalphPage() {
         <p className="text-sm text-slate-500 mt-0.5">系统运行状态与工作总览</p>
       </div>
 
+      {/* 运行状态头部 */}
+      <div className="mb-4">
+        <RunStatusHeader
+          connected={connected}
+          runStatus={adaptRunStatus(runStatus) as RunStatus}
+          loading={loading}
+          onRefresh={handleRefresh}
+        />
+      </div>
+
       {/* 统计卡片 */}
-      <div className="mb-5"><StatCards /></div>
+      <div className="mb-4"><StatCards /></div>
+
+      {/* 快速入口行 — 条件渲染 */}
+      {(pendingCount > 0 || unresolvedBlockers > 0 || pendingCommandCount > 0) && (
+        <div className="flex flex-wrap items-center gap-2 mb-5">
+          {pendingCount > 0 && (
+            <Link
+              href="/ralph/approvals"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-amber-200 bg-amber-50 text-xs font-medium text-amber-700 hover:bg-amber-100 transition-colors"
+            >
+              <ShieldCheck size={12} />
+              待审批 {pendingCount} 个
+              <ArrowRight size={10} />
+            </Link>
+          )}
+          {unresolvedBlockers > 0 && (
+            <Link
+              href="/ralph/work-units?status=blocked"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-red-200 bg-red-50 text-xs font-medium text-red-700 hover:bg-red-100 transition-colors"
+            >
+              <AlertTriangle size={12} />
+              阻塞项 {unresolvedBlockers} 个
+              <ArrowRight size={10} />
+            </Link>
+          )}
+          {pendingCommandCount > 0 && (
+            <Link
+              href="/ralph/commands"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-blue-200 bg-blue-50 text-xs font-medium text-blue-700 hover:bg-blue-100 transition-colors"
+            >
+              <Terminal size={12} />
+              待命令 {pendingCommandCount} 个
+              <ArrowRight size={10} />
+            </Link>
+          )}
+          <Link
+            href="/ralph/work-units"
+            className="flex items-center gap-1 px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs text-slate-500 hover:bg-slate-50 transition-colors"
+          >
+            查看全部
+            <ArrowRight size={10} />
+          </Link>
+        </div>
+      )}
 
       {/* 操作入口 */}
       <div className="flex items-center gap-3 mb-5">

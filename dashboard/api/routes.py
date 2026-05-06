@@ -1918,6 +1918,73 @@ def _write_claude_md(path: Path, name: str) -> None:
         cfg: RalphConfigManager = app.state.config_manager
         return cfg.get_scheduling_timeline(limit=50)
 
+    # --- Ralph API: Decision Log (ADR) 端点 ---
+
+    @app.get("/api/ralph/decisions")
+    async def ralph_list_decisions() -> list[dict]:
+        """列出所有架构决策记录。"""
+        from ralph.decision_log import DecisionLog
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        return DecisionLog(ralph_dir).list_all()
+
+    @app.post("/api/ralph/decisions")
+    async def ralph_create_decision(body: dict[str, Any]) -> dict:
+        """创建一条架构决策记录。"""
+        from ralph.decision_log import DecisionLog
+        from dataclasses import asdict
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        adr = DecisionLog(ralph_dir).create(
+            title=body.get("title", ""),
+            context=body.get("context", ""),
+            decision=body.get("decision", ""),
+            alternatives=body.get("alternatives"),
+            consequences=body.get("consequences", ""),
+        )
+        return asdict(adr)
+
+    @app.get("/api/ralph/decisions/{adr_id}")
+    async def ralph_get_decision(adr_id: str) -> dict:
+        """获取单条架构决策记录。"""
+        from ralph.decision_log import DecisionLog
+        from dataclasses import asdict
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        adr = DecisionLog(ralph_dir).get(adr_id)
+        if adr is None:
+            raise HTTPException(status_code=404, detail=f"ADR {adr_id} not found")
+        return asdict(adr)
+
+    @app.post("/api/ralph/decisions/{adr_id}/accept")
+    async def ralph_accept_decision(adr_id: str) -> dict:
+        """接受一条架构决策。"""
+        from ralph.decision_log import DecisionLog
+        from dataclasses import asdict
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        try:
+            adr = DecisionLog(ralph_dir).accept(adr_id)
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        return asdict(adr)
+
+    @app.post("/api/ralph/decisions/{adr_id}/supersede")
+    async def ralph_supersede_decision(adr_id: str, body: dict[str, Any]) -> dict:
+        """用新决策取代一条架构决策。"""
+        from ralph.decision_log import DecisionLog
+        from dataclasses import asdict
+        superseded_by = body.get("superseded_by", "")
+        if not superseded_by:
+            raise HTTPException(status_code=422, detail="superseded_by required")
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        try:
+            adr = DecisionLog(ralph_dir).supersede(adr_id, superseded_by)
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        return asdict(adr)
+
     # --- Ralph API: Agent Definitions 端点 ---
 
     @app.get("/api/ralph/agents/definitions")
