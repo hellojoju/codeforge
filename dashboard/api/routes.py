@@ -1446,6 +1446,12 @@ def create_dashboard_app(
 
     # --- Ralph API: 项目管理端点 ---
 
+    @app.get("/api/ralph/projects/recent")
+    async def ralph_list_recent_projects() -> list[dict]:
+        """列出最近打开的项目（轻量，用于侧边栏切换器）。"""
+        cfg: RalphConfigManager = app.state.config_manager
+        return cfg.list_recent_projects()
+
     @app.get("/api/ralph/projects")
     async def ralph_list_projects() -> list[dict]:
         """列出已知项目（最近打开 + 扫描发现）。"""
@@ -1553,6 +1559,8 @@ def create_dashboard_app(
             raise HTTPException(status_code=422, detail="path is required")
 
         project_path = Path(path_str).resolve()
+        if (project_path / ".ralph").exists():
+            raise HTTPException(status_code=400, detail=f"目录 {path_str} 已存在 Ralph 项目数据，请选择其他路径")
         project_path.mkdir(parents=True, exist_ok=True)
 
         # 1. 创建标准目录结构
@@ -1609,6 +1617,23 @@ def create_dashboard_app(
             "ralph_dir": str(ralph_dir),
             "dirs_created": dirs_to_create,
         }
+
+    @app.get("/api/ralph/fs/list")
+    async def ralph_fs_list(path: str = "/") -> dict:
+        """列出指定目录下的子目录（用于前端目录选择器）。"""
+        target = Path(path).expanduser().resolve()
+        if not target.exists() or not target.is_dir():
+            raise HTTPException(status_code=400, detail=f"目录不存在: {path}")
+        entries = []
+        try:
+            for child in sorted(target.iterdir()):
+                if child.name.startswith("."):
+                    continue
+                if child.is_dir():
+                    entries.append({"name": child.name, "path": str(child), "is_dir": True})
+        except PermissionError:
+            raise HTTPException(status_code=403, detail="无权限访问该目录")
+        return {"path": str(target), "parent": str(target.parent) if target.parent != target else None, "entries": entries}
 
     # --- Ralph API: 项目管理端点 ---
 
@@ -2393,25 +2418,41 @@ def _generate_pm_response(
     broadcast_queue: deque,
     product_manager: ProductManager | None = None,
 ) -> ChatMessage | None:
-    """调用 ProductManager agent 生成 PM 回复。"""
-    # 从 Repository 获取 chat history
+    """调用 ProductManager agent 生成 PM 回复（含意图识别 + 动作执行）。"""
+    from core.pm_actions import ActionResult, classify_intent, execute_action
+
     snapshot = repository.load_snapshot()
     chat_history = snapshot.chat_history
+    user_message = chat_history[-1].content if chat_history else ""
 
-    if product_manager is None:
-        logger.warning("ProductManager 未配置，使用 fallback 回复")
+    if product_manager is None or not user_message:
+        logger.warning("ProductManager 未配置或无消息，使用 fallback 回复")
         pm_content = "PM 暂未就绪，请重试。"
+        pm_action = ""
     else:
-        user_message = chat_history[-1].content if chat_history else ""
-        pm_content = product_manager.chat_response(user_message, chat_history, repository)
-        if not pm_content:
-            logger.error("ProductManager.chat_response 返回空结果")
-            pm_content = "PM 处理消息时出错，请重试。"
+        # 步骤 1：意图识别（关键词规则匹配）
+        intent = classify_intent(
+            user_message, product_manager.project_dir, product_manager._initialized
+        )
+        action_name = intent.get("action", "chat")
+        params = intent.get("params", {})
+
+        # 步骤 2：路由到执行器
+        if action_name == "chat":
+            # 普通对话 → 走 Claude 生成回复
+            pm_content = product_manager.chat_response(user_message, chat_history, repository)
+            pm_action = ""
+        else:
+            # 动作命令 → 直接执行
+            result = execute_action(action_name, params, product_manager.project_dir)
+            pm_content = result.reply
+            pm_action = action_name
 
     pm_msg = ChatMessage(
         id=f"pm_{_now_iso()}",
         role="pm",
         content=pm_content,
+        action_triggered=pm_action,
     )
 
     # 持久化到 Repository
@@ -2424,7 +2465,7 @@ def _generate_pm_response(
             "id": pm_msg.id,
             "content": pm_content,
             "timestamp": pm_msg.timestamp,
-            "action_triggered": "",
+            "action_triggered": pm_action,
         },
     )
     _emit_to_ws(broadcast_queue, event)

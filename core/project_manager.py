@@ -485,7 +485,7 @@ class ProjectManager:
         }
 
     def chat_response(self, user_message: str, chat_history: list, repository) -> str:
-        """处理用户对话消息，调用 Claude Code 生成 PM 回复。
+        """处理用户对话消息，先做意图识别，再路由到动作执行或纯对话。
 
         Args:
             user_message: 用户最新消息
@@ -495,79 +495,19 @@ class ProjectManager:
         Returns:
             PM 回复内容字符串
         """
-        import os
-        import subprocess
-        import tempfile
+        from core.pm_actions import ActionResult, classify_intent, execute_action
 
-        # 构建项目上下文
         status = self.get_status()
-        features = self.feature_tracker.all_features()
-        feature_summary = "\n".join(
-            f"- {f.id} ({f.category}): {f.description} [{f.status}]"
-            for f in features[:20]  # 最多取20个避免 prompt 过长
-        )
 
-        # 构建对话历史上下文
-        history_lines = []
-        for msg in chat_history[:-1]:  # 排除最新消息（即用户消息本身）
-            role = "用户" if msg.role == "user" else "PM"
-            history_lines.append(f"{role}: {msg.content}")
-        history_text = "\n".join(history_lines) if history_lines else "（无历史对话）"
+        # 步骤 1：意图识别
+        intent = classify_intent(user_message, self.project_dir, status["initialized"])
+        action = intent.get("action", "chat")
+        params = intent.get("params", {})
+        reply = intent.get("reply", "")
 
-        prompt = f"""你是一个AI软件开发团队的项目经理（PM）。你的职责是：
-1. 理解用户的需求和指令
-2. 管理开发团队的进度和状态
-3. 做出技术决策和任务分配
-4. 回答关于项目状态的问题
+        # 步骤 2：路由到执行器
+        if action == "chat":
+            return reply
 
-## 当前项目状态
-
-已初始化: {status['initialized']}
-Features 总计: {status['features']['total']}
-已完成: {status['features']['done']}
-进行中: {status['features']['in_progress']}
-待执行: {status['features']['pending']}
-被阻塞: {status['features']['blocked']}
-
-## Feature 列表
-
-{feature_summary or "（暂无 Feature）"}
-
-## 最近对话历史
-
-{history_text}
-
-## 用户最新消息
-
-{user_message}
-
-请根据当前项目状态和对话历史，用中文回复用户。回复要简洁、专业、有建设性。
-如果用户提到了具体的开发需求，请说明你将如何安排团队执行。"""
-
-        # 将 prompt 写入临时文件
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(prompt)
-            prompt_file = f.name
-
-        try:
-            result = subprocess.run(
-                ["claude", "--print", "-p", prompt_file],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=str(self.project_dir),
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-            else:
-                error_detail = result.stderr.strip()[:200] if result.stderr else "未知错误"
-                return f"PM 处理消息时出错: {error_detail}"
-        except subprocess.TimeoutExpired:
-            return "PM 处理消息超时，请稍后重试"
-        except Exception as e:
-            return f"PM 处理消息时出错: {e}"
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(prompt_file)
+        result = execute_action(action, params, self.project_dir)
+        return result.reply
