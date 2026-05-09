@@ -573,15 +573,21 @@ class RalphCommandHandler:
         if not ready_units:
             return {"success": False, "message": "没有 ready 状态的 WorkUnit", "work_id": work_id}
 
-        max_parallel = payload.get("max_parallel", 3)
+        max_parallel = payload.get("max_parallel", 5)
         prd_summary = payload.get("prd_summary", "")
 
         # ParallelOrchestrator 需要 project_dir（repo 的父级）
         project_dir = self._ralph_dir.parent
+
+        # 加载 Agent 定义（角色 max_instances 用于分配并发）
+        cfg = RalphConfigManager(self._ralph_dir)
+        agent_defs = cfg.list_agent_definitions_raw()
+
         orchestrator = ParallelOrchestrator(
             repo_dir=project_dir,
             max_parallel=max_parallel,
             work_unit_engine=self._engine,
+            agent_definitions=agent_defs,
         )
 
         try:

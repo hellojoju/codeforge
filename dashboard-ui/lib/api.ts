@@ -54,9 +54,9 @@ export async function sendChat(
   content: string,
   projectId = 'default',
   runId = '',
-): Promise<{ success: boolean; message_id: string; pm_response: { id: string; role: string; content: string; timestamp: string; action_triggered: string } }> {
+): Promise<{ success: boolean; message_id: string; pm_response: { id: string; role: string; content: string; timestamp: string; action_triggered: string }; steps?: Array<{ label: string; status: string; detail: string; duration_ms: number }> }> {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 30000) // 30s 超时
+  const timeoutId = setTimeout(() => controller.abort(), 120000) // 120s 超时
   try {
     const res = await fetch(`${API_BASE}/api/chat`, {
       method: 'POST',

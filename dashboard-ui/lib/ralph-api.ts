@@ -611,6 +611,10 @@ export async function listProjects(): Promise<ProjectInfo[]> {
   return request<ProjectInfo[]>('/projects');
 }
 
+export async function listRecentProjects(): Promise<{ name: string; path: string; last_opened_at: string | null }[]> {
+  return request('/projects/recent');
+}
+
 export async function openProject(path: string): Promise<Record<string, unknown>> {
   return request('/projects/open', { method: 'POST', body: JSON.stringify({ path }) });
 }
@@ -625,6 +629,16 @@ export async function getProjectAnalysis(): Promise<{ analysis: ProjectAnalysis 
 
 export async function initProject(path: string, name: string): Promise<Record<string, unknown>> {
   return request('/projects/init', { method: 'POST', body: JSON.stringify({ path, name }) });
+}
+
+export interface FsEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+export async function browseFs(path: string): Promise<{ path: string; parent: string | null; entries: FsEntry[] }> {
+  return request(`/fs/list?path=${encodeURIComponent(path)}`);
 }
 
 // ============================================================================

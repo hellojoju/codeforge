@@ -149,12 +149,20 @@ export interface DashboardEvent {
   payload: Record<string, unknown>
 }
 
+export interface ChatStep {
+  label: string
+  status: 'running' | 'done' | 'error' | 'pending'
+  detail: string
+  duration_ms: number
+}
+
 export interface ChatMessage {
   id: string
   role: ChatRole
   content: string
   timestamp: string
   action_triggered: string
+  steps?: ChatStep[]
 }
 
 /** 同角色多 Agent 的模块分配记录。 */

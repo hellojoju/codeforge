@@ -547,7 +547,18 @@ class RegressionTester:
 class ParallelOrchestrator:
     """Phase 3 并行执行编排器，整合全部 6 项能力。"""
 
-    def __init__(self, repo_dir: Path, max_parallel: int = 3, work_unit_engine=None):
+    def __init__(
+        self,
+        repo_dir: Path,
+        max_parallel: int = 5,
+        work_unit_engine=None,
+        agent_definitions: list[dict] | None = None,
+    ):
+        """
+        Args:
+            max_parallel: 全局并发安全阀上限（默认 5）
+            agent_definitions: 角色定义列表，用于按角色的 max_instances 分配并发
+        """
         self.repo = repo_dir
         self._wue = work_unit_engine
         self.worktree_mgr = WorktreeManager(repo_dir)
@@ -558,12 +569,54 @@ class ParallelOrchestrator:
         self._lock_dir = resolve_ralph_dir(repo_dir) / "locks"
         self._lock_dir.mkdir(parents=True, exist_ok=True)
 
+        # 构建角色 → max_instances 映射，默认 1
+        self._role_max_instances: dict[str, int] = {}
+        for agent_def in (agent_definitions or []):
+            self._role_max_instances[agent_def.get("role", "")] = agent_def.get("max_instances", 1)
+
     async def dispatch_work_units(self, work_units: list, prd_summary: str = "") -> dict:
         """并行执行一批 WorkUnit。
 
-        按依赖拓扑分层，每层内各 WorkUnit 在独立 worktree 中并发执行，
+        按依赖拓扑分层，每层内按角色 max_instances 分配并发，
         每层执行完后合并回主线，最后跑回归测试。
         """
+        # 构建 work_id → role 映射（从 producer_role）
+        wu_role_map: dict[str, str] = {}
+        for wu in work_units:
+            wu_role_map[wu.work_id] = getattr(wu, "producer_role", "")
+
+        # 按角色 max_instances 切分层为批次
+        def split_layer_by_role(task_ids: list[str], role_map: dict[str, str]) -> list[list[str]]:
+            """将一层任务按角色 max_instances 分组，全局不超过 max_parallel。"""
+            # 统计各角色当前已分配数
+            role_count: dict[str, int] = {}
+            batches: list[list[str]] = []
+            remaining = list(task_ids)
+
+            while remaining:
+                batch = []
+                for tid in list(remaining):
+                    role = role_map.get(tid, "")
+                    role_limit = self._role_max_instances.get(role, 1)
+                    current = role_count.get(role, 0)
+                    # 该角色已达上限 or 全局达上限
+                    if current >= role_limit:
+                        continue
+                    if len(batch) >= self.executor._max:
+                        break
+                    batch.append(tid)
+                    role_count[role] = current + 1
+                    remaining.remove(tid)
+
+                if not batch:
+                    # 所有角色都满了，本轮剩余的等下轮
+                    batches.append(remaining)
+                    break
+
+                batches.append(batch)
+
+            return batches
+
         # 转为并行任务
         tasks = []
         for wu in work_units:
@@ -580,42 +633,50 @@ class ParallelOrchestrator:
         all_details = []
 
         for layer in layers:
-            async def _exec_one(tid: str) -> dict:
-                task = self.executor._tasks.get(tid)
-                if not task:
-                    return {"task_id": tid, "error": "task not found"}
+            # 按角色 max_instances 进一步拆分
+            sub_batches = split_layer_by_role(layer, wu_role_map)
+            logger.info(
+                "并行调度: 原层 %d 个任务 → 按角色拆分为 %d 批 (max_parallel=%d)",
+                len(layer), len(sub_batches), self.executor._max,
+            )
 
-                # 创建 worktree 隔离
-                wt = self.worktree_mgr.create(task.task_id)
-                if wt:
-                    task.worktree_name = wt.name
+            for sub_batch in sub_batches:
+                async def _exec_one(tid: str) -> dict:
+                    task = self.executor._tasks.get(tid)
+                    if not task:
+                        return {"task_id": tid, "error": "task not found"}
 
-                tool_cwd = wt.path if wt else None
+                    # 创建 worktree 隔离
+                    wt = self.worktree_mgr.create(task.task_id)
+                    if wt:
+                        task.worktree_name = wt.name
 
-                try:
-                    if self._wue:
-                        result = await self._wue.execute(tid, prd_summary=prd_summary, tool_cwd=tool_cwd)
-                        success = result.get("success", False)
-                        self.executor.complete(tid, success, result)
-                    else:
-                        self.executor.complete(tid, True)
-                except Exception as e:
-                    logger.error("WorkUnit %s 并行执行异常: %s", tid, e)
-                    self.executor.complete(tid, False, {"error": str(e)})
+                    tool_cwd = wt.path if wt else None
 
-                return {"task_id": tid, "worktree": wt.name if wt else ""}
+                    try:
+                        if self._wue:
+                            result = await self._wue.execute(tid, prd_summary=prd_summary, tool_cwd=tool_cwd)
+                            success = result.get("success", False)
+                            self.executor.complete(tid, success, result)
+                        else:
+                            self.executor.complete(tid, True)
+                    except Exception as e:
+                        logger.error("WorkUnit %s 并行执行异常: %s", tid, e)
+                        self.executor.complete(tid, False, {"error": str(e)})
 
-            # 本层并发执行
-            layer_results = await asyncio.gather(*[_exec_one(tid) for tid in layer])
+                    return {"task_id": tid, "worktree": wt.name if wt else ""}
 
-            # 合并回主线
-            for r in layer_results:
-                if r.get("worktree"):
-                    branch = f"parallel/{r['task_id']}"
-                    merge_result = self.merge_handler.merge(branch)
-                    r["merge"] = merge_result
-                    self.worktree_mgr.remove(r["task_id"])
-                all_details.append(r)
+                # 本批并发执行
+                layer_results = await asyncio.gather(*[_exec_one(tid) for tid in sub_batch])
+
+                # 合并回主线
+                for r in layer_results:
+                    if r.get("worktree"):
+                        branch = f"parallel/{r['task_id']}"
+                        merge_result = self.merge_handler.merge(branch)
+                        r["merge"] = merge_result
+                        self.worktree_mgr.remove(r["task_id"])
+                    all_details.append(r)
 
         # 回归测试
         regression = self.regression.run_tests()

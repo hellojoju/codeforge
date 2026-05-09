@@ -24,7 +24,7 @@ import {
 import { cn } from '@/lib/utils';
 import {
   listProjects, openProject, analyzeProject,
-  getProjectAnalysis, initProject,
+  getProjectAnalysis, initProject, browseFs, type FsEntry,
   type ProjectInfo, type ProjectAnalysis,
 } from '@/lib/ralph-api';
 import { useRalphStore } from '@/lib/ralph-store';
@@ -378,29 +378,120 @@ function ProjectCard({
   );
 }
 
+// ─── 目录选择器 ─────────────────────────────────────
+
+function DirPickerModal({ onClose, onConfirm }: {
+  onClose: () => void;
+  onConfirm: (path: string) => void;
+}) {
+  const [currentPath, setCurrentPath] = useState('/Users');
+  const [entries, setEntries] = useState<FsEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const navigate = async (dirPath: string) => {
+    setLoading(true);
+    try {
+      const result = await browseFs(dirPath);
+      setCurrentPath(result.path);
+      setEntries(result.entries);
+    } catch {
+      toast.error('无法访问该目录');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { void navigate('/Users'); }, []);
+
+  const handleGoUp = () => {
+    if (currentPath === '/') return;
+    void navigate(currentPath.split('/').slice(0, -1).join('/') || '/');
+  };
+
+  const handleSelect = (entry: FsEntry) => {
+    if (entry.is_dir) {
+      void navigate(entry.path);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20" onClick={onClose}>
+      <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="px-4 py-3 border-b border-slate-100">
+          <h3 className="text-sm font-semibold text-slate-900">选择目录</h3>
+          <p className="text-[10px] text-slate-400 mt-0.5 truncate font-mono">{currentPath}</p>
+        </div>
+        <div className="max-h-64 overflow-auto py-1">
+          {currentPath !== '/' && (
+            <button onClick={handleGoUp}
+              className="w-full px-4 py-2 text-left text-sm text-slate-500 hover:bg-slate-50 flex items-center gap-2">
+              <span className="text-slate-400">↑</span> 返回上级
+            </button>
+          )}
+          {loading && <p className="px-4 py-3 text-xs text-slate-400">加载中...</p>}
+          {!loading && entries.length === 0 && <p className="px-4 py-3 text-xs text-slate-400">空目录</p>}
+          {entries.map((e) => (
+            <button key={e.path} onClick={() => handleSelect(e)}
+              className="w-full px-4 py-2 text-left text-sm text-slate-700 hover:bg-blue-50 flex items-center gap-2">
+              <span className="text-slate-400">{e.is_dir ? '📁' : '📄'}</span>
+              {e.name}
+            </button>
+          ))}
+        </div>
+        <div className="px-4 py-3 border-t border-slate-100 flex gap-2">
+          <button onClick={() => { onConfirm(currentPath); onClose(); }}
+            className="flex-1 h-8 text-xs font-medium rounded-lg bg-slate-800 text-white hover:bg-slate-700">
+            选择此目录
+          </button>
+          <button onClick={onClose}
+            className="h-8 px-3 text-xs rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">
+            取消
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── 新建项目弹窗 ───────────────────────────────────
 
 function NewProjectModal({ onClose, onCreated }: {
   onClose: () => void;
   onCreated: () => void;
 }) {
+  const router = useRouter();
+  const { setCurrentProject } = useRalphStore();
   const [path, setPath] = useState('');
   const [name, setName] = useState('');
   const [creating, setCreating] = useState(false);
+  const [showDirPicker, setShowDirPicker] = useState(false);
 
   const handleCreate = async () => {
     if (!path) return;
     setCreating(true);
     try {
-      await initProject(path, name || path.split('/').pop() || 'untitled');
+      const result = await initProject(path, name || path.split('/').pop() || 'untitled');
+      setCurrentProject({ name: result.name as string, path: result.path as string });
       toast.success('项目已创建');
       onCreated();
       onClose();
-    } catch { toast.error('创建失败'); }
+      router.push('/ralph/brainstorm');
+    } catch (e) {
+      if (e instanceof Error && 'responseBody' in e) {
+        const detail = (e as { responseBody: unknown }).responseBody;
+        const msg = typeof detail === 'object' && detail !== null && 'detail' in detail
+          ? String((detail as Record<string, string>).detail)
+          : e.message;
+        toast.error(msg);
+      } else {
+        toast.error('创建失败');
+      }
+    }
     finally { setCreating(false); }
   };
 
   return (
+    <>
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/20" onClick={onClose}>
       <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-5">
@@ -408,7 +499,7 @@ function NewProjectModal({ onClose, onCreated }: {
             <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-slate-800 text-white"><Plus size={14} /></div>
             <div>
               <h2 className="text-sm font-semibold text-slate-900">新建项目</h2>
-              <p className="text-[10px] text-slate-400">指定目录创建 Ralph 项目</p>
+              <p className="text-[10px] text-slate-400">指定目录创建新项目</p>
             </div>
           </div>
           <button onClick={onClose} className="p-1 rounded-md hover:bg-slate-100 text-slate-400">
@@ -418,9 +509,15 @@ function NewProjectModal({ onClose, onCreated }: {
         <div className="space-y-3.5">
           <div>
             <label className="text-[11px] font-medium text-slate-600 mb-1 block">项目路径</label>
-            <input value={path} onChange={(e) => { setPath(e.target.value); if (!name) setName(e.target.value.split('/').pop() || ''); }}
-              className="w-full h-9 px-3 text-sm rounded-lg border border-slate-200 outline-none focus:border-slate-400 transition-colors"
-              placeholder="/Users/xxx/my-project" />
+            <div className="flex gap-2">
+              <input value={path} onChange={(e) => { setPath(e.target.value); if (!name) setName(e.target.value.split('/').pop() || ''); }}
+                className="flex-1 h-9 px-3 text-sm rounded-lg border border-slate-200 outline-none focus:border-slate-400 transition-colors"
+                placeholder="/Users/xxx/my-project" />
+              <button onClick={() => setShowDirPicker(true)}
+                className="h-9 px-3 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 transition-colors whitespace-nowrap">
+                浏览
+              </button>
+            </div>
           </div>
           <div>
             <label className="text-[11px] font-medium text-slate-600 mb-1 block">项目名称（可选）</label>
@@ -439,6 +536,10 @@ function NewProjectModal({ onClose, onCreated }: {
         </div>
       </div>
     </div>
+    {showDirPicker && (
+      <DirPickerModal onClose={() => setShowDirPicker(false)} onConfirm={(p) => { setPath(p); if (!name) setName(p.split('/').pop() || ''); }} />
+    )}
+    </>
   );
 }
 

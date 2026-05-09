@@ -4,14 +4,20 @@
 
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { MessageCircle, Send, RefreshCw, CheckCircle, HelpCircle, Route } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { listBrainstormSessions, startBrainstorm, brainstormRespond } from '@/lib/ralph-api';
 import { formatDate } from '@/lib/ralph-utils';
 import { toast } from 'sonner';
+import { useRalphStore } from '@/lib/ralph-store';
 
 export default function BrainstormPage() {
+  const router = useRouter();
+  const { currentProject } = useRalphStore();
+  const checkedRef = useRef(false);
+
   const [sessions, setSessions] = useState<Record<string, unknown>[]>([]);
   const [activeSession, setActiveSession] = useState<Record<string, unknown> | null>(null);
   const [questions, setQuestions] = useState<string[]>([]);
@@ -24,13 +30,22 @@ export default function BrainstormPage() {
     finally { setLoaded(true); }
   };
 
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    if (checkedRef.current) return;
+    checkedRef.current = true;
+    if (!currentProject) {
+      toast.error('请先打开一个项目');
+      router.push('/ralph/projects');
+      return;
+    }
+    void load();
+  }, [currentProject]);
 
   const handleStart = async () => {
-    if (!input) return;
+    if (!input || !currentProject) return;
     setLoading(true);
     try {
-      const result = await startBrainstorm('新项目', input);
+      const result = await startBrainstorm(currentProject.name, input);
       setActiveSession({ record_id: result.record_id });
       setQuestions(result.questions as string[]);
       setInput('');

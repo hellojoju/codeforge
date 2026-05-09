@@ -12,7 +12,7 @@ import tempfile
 import threading
 from collections import deque
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -486,17 +486,30 @@ def create_dashboard_app(
         )
         _emit_to_ws(app.state.broadcast_queue, event)
 
+        # Resolve project directory from request body, fallback to PM's default
+        requested_dir = body.get("project_id") or body.get("project_dir")
+        pm_dir = app.state.product_manager.project_dir if app.state.product_manager else None
+        if requested_dir and requested_dir != "default":
+            project_dir = Path(requested_dir).resolve()
+            if not project_dir.exists():
+                project_dir = pm_dir or Path(".")
+        else:
+            project_dir = pm_dir or Path(".")
+
         # 调用 PM 生成回复
-        pm_response = _generate_pm_response(
+        pm_msg, steps = _generate_pm_response(
             app.state.repository,
             app.state.broadcast_queue,
             app.state.product_manager,
+            app.state.config_manager,
+            project_dir=project_dir,
         )
 
         return {
             "success": True,
             "message_id": msg.id,
-            "pm_response": pm_response.to_dict() if pm_response else None,
+            "pm_response": pm_msg.to_dict() if pm_msg else None,
+            "steps": steps,
         }
 
     # --- REST: 批准（写为 pending，由 CommandConsumer 消费）---
@@ -2413,17 +2426,315 @@ def _create_command(cmd_type: str, body: dict[str, Any]) -> Command:
     )
 
 
+_PM_QUERY_RULES = [
+    ("project_info", ["介绍", "架构", "技术栈", "项目结构", "项目概况", "项目总结", "overview", "总结项目"]),
+    ("risk", ["风险", "阻塞", "问题", "隐患", "bug", "缺陷", "有什么不好的", "需要关注"]),
+    ("progress", ["进展", "完成", "进度", "做了什么", "work unit", "工作状态", "进度如何", "完成情况"]),
+    ("code_search", ["在哪", "哪个文件", "哪个模块", "谁负责", "搜索", "查找", "find", "search"]),
+]
+
+
+def _classify_pm_query(user_message: str) -> str:
+    """PM 对话意图分类：project_info / progress / risk / code_search / general。"""
+    msg_lower = user_message.lower()
+    for query_type, keywords in _PM_QUERY_RULES:
+        for kw in keywords:
+            if kw.lower() in msg_lower:
+                return query_type
+    return "general"
+
+
+def _fallback_project_info(project_dir: Path, parts: list) -> None:
+    """当 Claude Code 不可用时，使用 ProjectAnalyzer 做项目分析。"""
+    try:
+        from ralph.project_analyzer import ProjectAnalyzer
+        analyzer = ProjectAnalyzer(project_dir)
+        report = analyzer.get_saved_report()
+        if report:
+            parts.append(f"项目分析报告（已缓存）:\n{report[:3000]}")
+        else:
+            stats = analyzer.analyze()
+            parts.append(f"项目统计:\n{analyzer._to_markdown(stats)}")
+    except Exception as e:
+        parts.append(f"项目分析失败: {e}")
+
+
+def _gather_tool_context(
+    query_type: str,
+    user_message: str,
+    project_dir: Path,
+    repository: Any = None,
+) -> str:
+    """根据意图类型调用 Ralph 内部工具，返回结构化上下文文本。"""
+    parts: list[str] = []
+
+    if query_type == "project_info":
+        # 调用 Claude CLI 扫描项目（非纯 LLM 猜测）
+        try:
+            import subprocess
+            prompt = (
+                f"请用 Bash 工具扫描 {project_dir.name} 目录结构，找出主要编程语言、"
+                "关键目录和文件，然后总结：1) 项目用途和技术栈 2) 主要模块结构 3) 关键文件作用。"
+                "控制在 300 字以内。"
+            )
+            proc = subprocess.run(
+                ["claude", "--print", "--dangerously-skip-permissions", "-p", prompt],
+                cwd=str(project_dir),
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                parts.append(f"Claude Code 分析结果:\n{proc.stdout.strip()[:3000]}")
+            else:
+                # fallback 到 ProjectAnalyzer
+                _fallback_project_info(project_dir, parts)
+        except Exception as e:
+            parts.append(f"Claude Code 扫描失败: {e}")
+            _fallback_project_info(project_dir, parts)
+
+    elif query_type == "code_search":
+        # 调用 Claude CLI 搜索代码
+        try:
+            import subprocess
+            proc = subprocess.run(
+                ["claude", "--print", "--dangerously-skip-permissions", "-p",
+                 f"在 {project_dir.name} 目录中搜索与以下查询相关的代码: {user_message}\n"
+                 "请找出相关文件并说明其作用。控制在 200 字以内。"],
+                cwd=str(project_dir),
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                parts.append(f"Claude Code 搜索结果:\n{proc.stdout.strip()[:3000]}")
+            else:
+                parts.append("未找到相关结果。")
+        except Exception as e:
+            parts.append(f"代码搜索失败: {e}")
+
+    elif query_type == "progress":
+        # 从 repository 拿 feature 进度
+        if repository:
+            try:
+                features = repository.list_features()
+                state_counts: dict[str, int] = {}
+                for f in features:
+                    s = getattr(f, "status", "unknown")
+                    state_counts[s] = state_counts.get(s, 0) + 1
+                total = len(features)
+                done = state_counts.get("done", 0) + state_counts.get("approved", 0)
+                pct = f"{done}/{total}" if total else "0/0"
+                parts.append(f"功能状态汇总:\n{json.dumps(state_counts, ensure_ascii=False, indent=2)}\n已完成: {pct}")
+                # 取最近几个 feature 的详情
+                recent = [f.to_dict() for f in features[:5]]
+                if recent:
+                    parts.append(f"最近功能 (前5条):\n{json.dumps(recent, ensure_ascii=False, indent=2)[:2000]}")
+                else:
+                    parts.append("暂无 Feature 数据。")
+            except Exception as e:
+                parts.append(f"进度查询失败: {e}")
+
+    elif query_type == "risk":
+        # 从 repository 拿 blocking_issues
+        if repository:
+            try:
+                issues = repository.list_blocking_issues(resolved=False)
+                if issues:
+                    parts.append(f"未解决的阻塞问题:\n{json.dumps([i.to_dict() for i in issues[:10]], ensure_ascii=False, indent=2)[:2000]}")
+                else:
+                    parts.append("当前无未解决的阻塞问题。")
+            except Exception as e:
+                parts.append(f"风险查询失败: {e}")
+
+    elif query_type == "code_search":
+        # 调用 retrieval_pipeline 做融合搜索
+        try:
+            from ralph.retrieval_pipeline import RetrievalPipeline
+            from ralph.repositories import Repository
+            repo = Repository(project_dir / ".ralph")
+            pipeline = RetrievalPipeline(repo, project_dir=project_dir)
+            results = pipeline.fusion_search(user_message, top_k=5)
+            if results.get("results"):
+                parts.append(f"搜索结果 (query='{user_message}'):\n{json.dumps(results, ensure_ascii=False, indent=2)[:3000]}")
+            else:
+                parts.append(f"未找到相关结果。")
+        except Exception as e:
+            parts.append(f"代码搜索失败: {e}")
+
+    # general 不收集上下文
+
+    return "\n\n".join(parts) if parts else ""
+
+
+_QUERY_INTENT_LABELS = {
+    "project_info": "项目分析",
+    "progress": "进度查询",
+    "risk": "风险评估",
+    "code_search": "代码搜索",
+    "general": "通用对话",
+}
+
+
+@dataclass
+class ChatStep:
+    """PM 对话执行步骤，用于前端实时展示工作进度。"""
+    label: str
+    status: str  # running / done / error
+    detail: str = ""
+    started_at: float = 0.0
+    ended_at: float = 0.0
+
+    @property
+    def duration_ms(self) -> float:
+        if self.started_at and self.ended_at:
+            return round((self.ended_at - self.started_at) * 1000, 0)
+        return 0
+
+    def to_dict(self) -> dict:
+        return {
+            "label": self.label,
+            "status": self.status,
+            "detail": self.detail,
+            "duration_ms": int(self.duration_ms),
+        }
+
+
+def _llm_chat_response(
+    user_message: str,
+    chat_history: list,
+    config_manager: Any,
+    project_dir: Path,
+    repository: Any = None,
+) -> tuple[str, list[dict]]:
+    """通过 LLM 生成 PM 对话回复。
+
+    流程：意图识别 → 调 Ralph 内部工具获取数据 → LLM 汇总工具结果。
+    不直接把项目代码塞给 LLM，而是用工具返回的结构化数据作为上下文。
+
+    返回: (回复内容, 执行步骤列表)
+    """
+    import time
+    steps: list[ChatStep] = []
+
+    if config_manager is None:
+        return "我还没连接到大脑，请先在配置中心设置 LLM Provider。", [
+            ChatStep("连接配置中心", "error", "未找到 LLM 配置").to_dict(),
+        ]
+
+    # Step 1: 意图分类
+    step1 = ChatStep("意图识别", "running", started_at=time.perf_counter())
+    steps.append(step1)
+    query_type = _classify_pm_query(user_message)
+    intent_label = _QUERY_INTENT_LABELS.get(query_type, query_type)
+    step1.status = "done"
+    step1.detail = f"识别为「{intent_label}」意图"
+    step1.ended_at = time.perf_counter()
+
+    # Step 2: 调工具收集上下文
+    step2 = ChatStep("查询项目数据", "running", started_at=time.perf_counter())
+    steps.append(step2)
+    tool_context = _gather_tool_context(query_type, user_message, project_dir, repository)
+    if tool_context:
+        step2.status = "done"
+        preview = tool_context.split("\n")[0][:80]
+        step2.detail = f"已获取数据：{preview}..."
+    else:
+        step2.status = "done"
+        step2.detail = "无相关数据"
+    step2.ended_at = time.perf_counter()
+
+    # Step 3: 构建 prompt
+    project_name = project_dir.name
+    system_parts = [
+        f"你是 Ralph，一个 AI 项目经理。当前项目: {project_name}。",
+        "请用简洁、专业的中文回复用户，使用 Markdown 格式。",
+    ]
+
+    if tool_context:
+        system_parts.append(
+            f"以下是工具返回的项目数据，请基于这些数据回答用户的问题：\n\n{tool_context}"
+        )
+        system_parts.append(
+            "请严格基于上面的数据回答，不要编造数据。"
+            "如果数据不足以完整回答，说明哪些信息还需要进一步查询。"
+        )
+
+    messages: list[dict] = [{"role": "system", "content": "\n\n".join(system_parts)}]
+
+    # 添加最近对话历史
+    recent = [m for m in chat_history if m.role in ("user", "pm")][-10:]
+    for m in recent:
+        messages.append({"role": "user" if m.role == "user" else "assistant", "content": m.content})
+
+    messages.append({"role": "user", "content": user_message})
+
+    # Step 4: 调用 LLM
+    step3 = ChatStep("向 AI 发送请求", "running", started_at=time.perf_counter())
+    steps.append(step3)
+    try:
+        provider = config_manager.resolve_agent_provider("product", "pm_chat")
+    except Exception:
+        provider = {"provider_id": "", "model": "", "source": "none"}
+
+    if not provider.get("provider_id"):
+        logger.warning("无可用 LLM Provider，PM 聊天降级为 fallback")
+        step3.status = "error"
+        step3.detail = "未配置 LLM Provider"
+        step3.ended_at = time.perf_counter()
+        return "还没有配置 LLM Provider，请在配置中心添加一个。", [s.to_dict() for s in steps]
+
+    step3.detail = f"模型: {provider.get('model', '')}"
+    result = config_manager.proxy_request(
+        provider["provider_id"],
+        "v1/chat/completions",
+        {
+            "model": provider.get("model", ""),
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 2000,
+        },
+    )
+
+    if result.get("ok"):
+        try:
+            choice = result["data"]["choices"][0]["message"]
+            content = choice.get("content", "")
+            # DeepSeek reasoning models may return content in reasoning_content
+            if not content:
+                content = choice.get("reasoning_content", "")
+            if content:
+                step3.status = "done"
+                usage = result["data"].get("usage", {})
+                tokens = usage.get("total_tokens", 0)
+                step3.detail = f"模型: {provider.get('model', '')} · {tokens} tokens"
+                step3.ended_at = time.perf_counter()
+                return content, [s.to_dict() for s in steps]
+        except (KeyError, IndexError, TypeError):
+            logger.warning("LLM 响应结构异常")
+
+    step3.status = "error"
+    step3.detail = "AI 响应解析失败"
+    step3.ended_at = time.perf_counter()
+    return "抱歉，我暂时无法回答这个问题。", [s.to_dict() for s in steps]
+
+
 def _generate_pm_response(
     repository: ProjectStateRepository,
     broadcast_queue: deque,
     product_manager: ProductManager | None = None,
-) -> ChatMessage | None:
-    """调用 ProductManager agent 生成 PM 回复（含意图识别 + 动作执行）。"""
+    config_manager: Any = None,
+    project_dir: Path | None = None,
+) -> tuple[ChatMessage | None, list[dict]]:
+    """调用 ProductManager agent 生成 PM 回复（含意图识别 + 动作执行）。
+
+    返回: (PM 消息, 执行步骤列表)
+    """
     from core.pm_actions import ActionResult, classify_intent, execute_action
 
     snapshot = repository.load_snapshot()
     chat_history = snapshot.chat_history
     user_message = chat_history[-1].content if chat_history else ""
+    steps: list[dict] = []
+
+    # Use provided project_dir, fallback to product_manager's dir
+    active_dir = project_dir or (product_manager.project_dir if product_manager else None)
 
     if product_manager is None or not user_message:
         logger.warning("ProductManager 未配置或无消息，使用 fallback 回复")
@@ -2432,19 +2743,21 @@ def _generate_pm_response(
     else:
         # 步骤 1：意图识别（关键词规则匹配）
         intent = classify_intent(
-            user_message, product_manager.project_dir, product_manager._initialized
+            user_message, active_dir, product_manager._initialized
         )
         action_name = intent.get("action", "chat")
         params = intent.get("params", {})
 
         # 步骤 2：路由到执行器
         if action_name == "chat":
-            # 普通对话 → 走 Claude 生成回复
-            pm_content = product_manager.chat_response(user_message, chat_history, repository)
+            # 普通对话 → 意图识别 + 调工具 + LLM 总结
+            pm_content, steps = _llm_chat_response(
+                user_message, chat_history, config_manager, active_dir, repository,
+            )
             pm_action = ""
         else:
             # 动作命令 → 直接执行
-            result = execute_action(action_name, params, product_manager.project_dir)
+            result = execute_action(action_name, params, active_dir)
             pm_content = result.reply
             pm_action = action_name
 
@@ -2458,7 +2771,7 @@ def _generate_pm_response(
     # 持久化到 Repository
     repository.add_chat_message(pm_msg)
 
-    # 广播给 WebSocket 客户端
+    # 广播给 WebSocket 客户端（包含步骤）
     event = repository.append_event(
         type="pm_response",
         pm_response={
@@ -2466,8 +2779,9 @@ def _generate_pm_response(
             "content": pm_content,
             "timestamp": pm_msg.timestamp,
             "action_triggered": pm_action,
+            "steps": steps,
         },
     )
     _emit_to_ws(broadcast_queue, event)
 
-    return pm_msg
+    return pm_msg, steps

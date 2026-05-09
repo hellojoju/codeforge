@@ -106,6 +106,7 @@ interface RalphActions {
   setCurrentProject: (project: { name: string; path: string } | null) => void
   setRecentProjects: (projects: { name: string; path: string; last_opened_at: string | null }[]) => void
   setProjectAnalysis: (analysis: Record<string, unknown> | null) => void
+  fetchSummary: () => Promise<void>
 
   // File actions
   setFileTree: (tree: Record<string, unknown>[]) => void
@@ -530,6 +531,15 @@ const createRalphStore = (initialTabs: Tab[] = []) =>
         setCurrentProject: (project) => set({ currentProject: project }),
         setRecentProjects: (projects) => set({ recentProjects: projects }),
         setProjectAnalysis: (analysis) => set({ projectAnalysis: analysis }),
+        fetchSummary: async () => {
+          try {
+            const { getSummary } = await import('./ralph-api')
+            const summary = await getSummary()
+            set({ runStatus: summary, loading: false })
+          } catch {
+            set({ loading: false })
+          }
+        },
 
         // File actions
         setFileTree: (tree) => set({ fileTree: tree }),

@@ -8,8 +8,16 @@ import { useState, useEffect } from 'react';
 import { ChevronLeft, Plus, Trash2, ChevronDown, ChevronUp, CheckCircle, Eye, EyeOff } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
-import { listAgentDefinitions, saveAgentDefinition, deleteAgentDefinition, type AgentDefinition } from '@/lib/ralph-api';
+import { listAgentDefinitions, saveAgentDefinition, deleteAgentDefinition, getToolchain, type AgentDefinition } from '@/lib/ralph-api';
 import { toast } from 'sonner';
+
+const TOOL_NAME_MAP: Record<string, string> = {
+  claude_code: 'Claude Code',
+  codex: 'OpenAI Codex',
+  aider: 'Aider',
+  cline: 'Cline',
+  openclaw: 'OpenClaw',
+};
 
 export default function AgentSettingsPage() {
   const [defs, setDefs] = useState<AgentDefinition[]>([]);
@@ -18,10 +26,17 @@ export default function AgentSettingsPage() {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<Partial<AgentDefinition>>({ agent_class: 'base', max_instances: 1, enabled: true });
   const [saving, setSaving] = useState<string | null>(null);
+  const [enabledTools, setEnabledTools] = useState<string[]>([]);
 
   useEffect(() => {
-    listAgentDefinitions()
-      .then((d) => setDefs(d))
+    Promise.all([
+      listAgentDefinitions(),
+      getToolchain().then((c) => c?.enabled_tools ?? []).catch(() => []),
+    ])
+      .then(([d, tools]) => {
+        setDefs(d);
+        setEnabledTools(tools);
+      })
       .catch(() => toast.error('加载失败'))
       .finally(() => setLoaded(true));
   }, []);
@@ -126,6 +141,33 @@ export default function AgentSettingsPage() {
           </div>
           <textarea placeholder="执行要求（简要描述该角色的职责）" value={form.execution_requirements || ''} onChange={(e) => setForm({ ...form, execution_requirements: e.target.value })}
             className="w-full px-3 py-2 text-sm rounded-md border outline-none focus:border-slate-400 h-16" />
+          <div>
+            <label className="text-xs font-medium text-slate-600 mb-2 block">可用工具</label>
+            <div className="flex flex-wrap gap-2">
+              {enabledTools.map((toolId) => {
+                const checked = (form.allowed_tools || []).includes(toolId);
+                return (
+                  <button
+                    key={toolId}
+                    onClick={() => {
+                      const current = form.allowed_tools || [];
+                      const next = checked ? current.filter((t) => t !== toolId) : [...current, toolId];
+                      setForm({ ...form, allowed_tools: next });
+                    }}
+                    className={cn(
+                      'px-3 py-1.5 text-xs rounded-full border transition-colors',
+                      checked ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-600 hover:border-slate-400',
+                    )}
+                  >
+                    {TOOL_NAME_MAP[toolId] || toolId}
+                  </button>
+                );
+              })}
+              {enabledTools.length === 0 && (
+                <span className="text-xs text-slate-400">请先在工具链配置中启用工具</span>
+              )}
+            </div>
+          </div>
           <textarea placeholder="System Prompt 内容" value={form.prompt_content || ''} onChange={(e) => setForm({ ...form, prompt_content: e.target.value })}
             className="w-full px-3 py-2 text-sm rounded-md border outline-none focus:border-slate-400 h-32 font-mono" />
           <div className="flex gap-2">
@@ -188,6 +230,30 @@ export default function AgentSettingsPage() {
                       <label className="text-xs font-medium text-slate-600 mb-1 block">最大实例数</label>
                       <input type="number" min={1} value={def.max_instances ?? 1} onChange={(e) => setDefs((prev) => prev.map((d) => (d.role === def.role ? { ...d, max_instances: parseInt(e.target.value) || 1 } : d)))}
                         className="w-full px-3 py-2 text-sm rounded-md border outline-none focus:border-slate-400" />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-600 mb-2 block">可用工具</label>
+                    <div className="flex flex-wrap gap-2">
+                      {enabledTools.map((toolId) => {
+                        const checked = (def.allowed_tools || []).includes(toolId);
+                        return (
+                          <button
+                            key={toolId}
+                            onClick={() => {
+                              const current = def.allowed_tools || [];
+                              const next = checked ? current.filter((t) => t !== toolId) : [...current, toolId];
+                              setDefs((prev) => prev.map((d) => (d.role === def.role ? { ...d, allowed_tools: next } : d)));
+                            }}
+                            className={cn(
+                              'px-3 py-1.5 text-xs rounded-full border transition-colors',
+                              checked ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-600 hover:border-slate-400',
+                            )}
+                          >
+                            {TOOL_NAME_MAP[toolId] || toolId}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                   <div>

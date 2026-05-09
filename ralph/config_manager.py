@@ -471,12 +471,13 @@ class RalphConfigManager:
 
     def proxy_request(self, provider_id: str, endpoint: str, body: dict) -> dict:
         """通过后端代理转发请求到 LLM Provider（前端不走 Provider API）。"""
-        provider = self.get_provider(provider_id)
+        import json as _json
+        import ssl
+        import urllib.request
+
+        provider = self.get_provider_decrypted(provider_id)
         if not provider:
             return {"ok": False, "error": "Provider not found"}
-
-        import urllib.request
-        import json as _json
 
         base_url = provider.get("base_url", "").rstrip("/")
         api_key = provider.get("api_key", "")
@@ -489,7 +490,8 @@ class RalphConfigManager:
         req.data = _json.dumps(body).encode()
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            ctx = ssl._create_unverified_context()
+            with urllib.request.urlopen(req, timeout=120, context=ctx) as resp:
                 response_data = _json.loads(resp.read().decode())
             # 记录 token 用量
             usage = response_data.get("usage", {})

@@ -63,7 +63,7 @@ function WelcomeScreen() {
 
         <div className="grid grid-cols-2 gap-4 mb-8">
           <Link
-            href="/ralph/brainstorm"
+            href="/ralph/projects"
             className="flex flex-col items-center gap-3 rounded-xl border-2 border-dashed border-slate-300 bg-white p-6 hover:border-blue-400 hover:bg-blue-50/50 transition-all"
           >
             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-100 text-blue-600">

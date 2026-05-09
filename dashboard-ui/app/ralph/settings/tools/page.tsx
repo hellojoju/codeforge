@@ -13,12 +13,6 @@ import Link from 'next/link';
 import { getToolchain, saveToolchain, dispatchParallel, type ToolchainConfig } from '@/lib/ralph-api';
 import { toast } from 'sonner';
 
-const TASK_TYPES = ['brainstorm', 'spec', 'architect', 'code_gen', 'review', 'test', 'report'];
-const TASK_LABELS: Record<string, string> = {
-  brainstorm: '需求共创', spec: '规范编写', architect: '架构设计',
-  code_gen: '代码生成', review: '代码审查', test: '测试', report: '报告生成',
-};
-
 const AVAILABLE_TOOLS = [
   { id: 'claude_code', name: 'Claude Code', description: 'Anthropic CLI，默认工具' },
   { id: 'codex', name: 'OpenAI Codex', description: 'OpenAI 编程 CLI' },
@@ -61,13 +55,6 @@ export default function ToolsSettingsPage() {
     if (swapIdx < 0 || swapIdx >= newPriority.length) return;
     [newPriority[idx], newPriority[swapIdx]] = [newPriority[swapIdx], newPriority[idx]];
     setConfig({ ...config, priority: newPriority });
-  };
-
-  const handleTaskToolChange = (taskType: string, toolId: string) => {
-    if (!config) return;
-    const assignments = { ...(config.task_assignments || {}), [taskType]: toolId };
-    if (!toolId) delete assignments[taskType];
-    setConfig({ ...config, task_assignments: assignments });
   };
 
   const [dispatching, setDispatching] = useState(false);
@@ -251,52 +238,6 @@ export default function ToolsSettingsPage() {
         </div>
       </section>
 
-      {/* Task → Tool assignment */}
-      <section className="mt-8">
-        <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">工具分配</h2>
-        <p className="text-xs text-slate-400 mb-3">指定每种任务类型使用的编程工具</p>
-        <div className="rounded-lg border border-slate-200 bg-white overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/50">
-                <th className="text-left px-4 py-2.5 text-xs font-medium text-slate-500">任务类型</th>
-                <th className="text-left px-4 py-2.5 text-xs font-medium text-slate-500">使用工具</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {TASK_TYPES.map((taskType) => {
-                const assignments = config?.task_assignments || {};
-                const selectedTool = assignments[taskType] || '';
-                return (
-                  <tr key={taskType}>
-                    <td className="px-4 py-2.5 text-sm font-medium text-slate-700">
-                      {TASK_LABELS[taskType] || taskType}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <select
-                        value={selectedTool}
-                        onChange={(e) => handleTaskToolChange(taskType, e.target.value)}
-                        className="text-xs rounded-md border border-slate-200 px-2 py-1 outline-none focus:border-slate-400 min-w-[140px]"
-                      >
-                        <option value="">按优先级自动选择</option>
-                        {enabledTools.map((toolId) => {
-                          const tool = AVAILABLE_TOOLS.find((t) => t.id === toolId);
-                          return (
-                            <option key={toolId} value={toolId}>
-                              {tool?.name || toolId}
-                            </option>
-                          );
-                        })}
-                      </select>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
       {/* Parallel execution */}
       <section className="mt-8 pt-6 border-t border-slate-100">
         <h2 className="text-sm font-semibold text-slate-900 mb-1">并行执行</h2>
@@ -305,16 +246,19 @@ export default function ToolsSettingsPage() {
         <div className="rounded-lg border border-slate-200 bg-white p-5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              <label className="text-sm text-slate-700">最大并发 Agent 数</label>
+              <div>
+                <label className="text-sm text-slate-700">全局最大并发 WorkUnit 数</label>
+                <p className="text-[10px] text-slate-400 mt-0.5">安全阀上限，实际并发按各角色 max_instances 分配</p>
+              </div>
               <div className="flex items-center gap-2">
                 <input
-                  type="range" min={1} max={10}
-                  value={config?.max_parallel ?? 3}
+                  type="range" min={1} max={20}
+                  value={config?.max_parallel ?? 5}
                   onChange={(e) => setConfig(config ? { ...config, max_parallel: parseInt(e.target.value) } : null)}
                   className="w-28 accent-slate-800"
                 />
                 <span className="text-sm font-semibold text-slate-800 min-w-[1.5rem] text-center">
-                  {config?.max_parallel ?? 3}
+                  {config?.max_parallel ?? 5}
                 </span>
               </div>
             </div>
@@ -331,13 +275,13 @@ export default function ToolsSettingsPage() {
             </button>
           </div>
           <div className="flex gap-3 mt-3">
-            {[1, 3, 5, 10].map((n) => (
+            {[3, 5, 10, 15, 20].map((n) => (
               <button
                 key={n}
                 onClick={() => setConfig(config ? { ...config, max_parallel: n } : null)}
                 className={cn(
                   'text-xs px-2 py-0.5 rounded border transition-colors',
-                  (config?.max_parallel ?? 3) === n
+                  (config?.max_parallel ?? 5) === n
                     ? 'border-slate-300 bg-slate-100 text-slate-700'
                     : 'border-slate-100 text-slate-400 hover:border-slate-200',
                 )}

@@ -4,6 +4,7 @@ import path from "path"
 const BACKEND_PORT = 18753
 
 const nextConfig: NextConfig = {
+  devIndicators: false,
   turbopack: {
     root: path.resolve(__dirname),
   },

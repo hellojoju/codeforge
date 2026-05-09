@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import {
-  ChevronLeft, ChevronRight, ChevronDown,
+  ChevronLeft, ChevronRight, ChevronDown, FolderOpen, Plus,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useRalphStore } from '@/lib/ralph-store';
@@ -82,16 +82,42 @@ export function Sidebar({ className }: SidebarProps) {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set(['advanced']));
-  const { pendingActions } = useRalphStore();
+  const { pendingActions, currentProject, recentProjects, setCurrentProject } = useRalphStore();
+  const [showProjectList, setShowProjectList] = useState(false);
 
   useEffect(() => {
     const stored = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
     if (stored) setCollapsed(stored === 'true');
   }, []);
 
+  // Load recent projects on mount
+  useEffect(() => {
+    if (recentProjects.length > 0) return;
+    const load = async () => {
+      try {
+        const { listRecentProjects } = await import('@/lib/ralph-api');
+        const projects = await listRecentProjects();
+        if (projects.length > 0) {
+          useRalphStore.setState({ recentProjects: projects });
+        }
+      } catch {
+        // silent
+      }
+    };
+    void load();
+  }, []);
+
   useEffect(() => {
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(collapsed));
   }, [collapsed]);
+
+  // Close project list on outside click
+  useEffect(() => {
+    if (!showProjectList) return;
+    const handler = () => setShowProjectList(false);
+    window.addEventListener('click', handler);
+    return () => window.removeEventListener('click', handler);
+  }, [showProjectList]);
 
   const isActiveRoute = (route: string) => {
     if (route === '/ralph') return pathname === '/ralph';
@@ -117,6 +143,18 @@ export function Sidebar({ className }: SidebarProps) {
       else next.add(sectionId);
       return next;
     });
+  };
+
+  const handleSwitchProject = async (projectPath: string, projectName: string) => {
+    try {
+      const { openProject } = await import('@/lib/ralph-api');
+      await openProject(projectPath);
+      setCurrentProject({ name: projectName, path: projectPath });
+      setShowProjectList(false);
+      router.push('/ralph');
+    } catch {
+      // silent fail
+    }
   };
 
   return (
@@ -240,15 +278,64 @@ export function Sidebar({ className }: SidebarProps) {
         })}
       </nav>
 
-      {/* Footer */}
+      {/* Footer — Project switcher */}
       <div className="border-t border-slate-200/70 p-3">
-        <div className={cn('flex items-center gap-2.5 rounded-md px-3 py-2 text-xs text-slate-500', collapsed && 'justify-center px-2')}>
-          <span className="relative flex h-2 w-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-          </span>
-          {!collapsed && <span>系统运行中</span>}
-        </div>
+        {currentProject ? (
+          <div className="relative">
+            <button
+              onClick={(e) => { e.stopPropagation(); !collapsed && setShowProjectList(!showProjectList); }}
+              className={cn(
+                'flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-xs text-slate-600 hover:bg-slate-100',
+                collapsed && 'justify-center px-2',
+              )}
+            >
+              <FolderOpen size={12} className="text-blue-500 flex-shrink-0" />
+              {!collapsed && (
+                <span className="flex flex-1 items-center justify-between truncate">
+                  <span className="truncate font-medium text-slate-700">{currentProject.name}</span>
+                  <ChevronDown size={10} className={cn('ml-1 text-slate-400 transition-transform', showProjectList && 'rotate-180')} />
+                </span>
+              )}
+            </button>
+            {!collapsed && showProjectList && (
+              <div className="absolute bottom-full left-0 right-0 mb-1 rounded-lg border border-slate-200 bg-white p-1 shadow-lg" onClick={(e) => e.stopPropagation()}>
+                <p className="px-2 py-1 text-[10px] font-semibold text-slate-400 uppercase">切换项目</p>
+                {recentProjects
+                  .filter((p) => p.path !== currentProject.path)
+                  .slice(0, 8)
+                  .map((p) => (
+                    <button
+                      key={p.path}
+                      onClick={() => handleSwitchProject(p.path, p.name)}
+                      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                    >
+                      <FolderOpen size={12} className="text-slate-400 flex-shrink-0" />
+                      <span className="truncate">{p.name}</span>
+                    </button>
+                  ))}
+                <div className="my-1 border-t border-slate-100" />
+                <button
+                  onClick={() => router.push('/ralph/projects')}
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-blue-600 hover:bg-blue-50"
+                >
+                  <Plus size={12} />
+                  <span>项目管理</span>
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <button
+            onClick={() => router.push('/ralph/projects')}
+            className={cn(
+              'flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-xs text-slate-500 hover:bg-slate-100',
+              collapsed && 'justify-center px-2',
+            )}
+          >
+            <Plus size={12} />
+            {!collapsed && <span>新建/打开项目</span>}
+          </button>
+        )}
       </div>
     </aside>
   );
