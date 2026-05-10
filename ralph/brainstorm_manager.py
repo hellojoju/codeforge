@@ -9,6 +9,7 @@ from typing import Any
 
 from ralph.schema.brainstorm_record import (
     BrainstormRecord, ConfirmedFact, OpenAssumption, UserPath, _now_iso,
+    dict_to_brainstorm,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,18 +45,19 @@ class BrainstormManager:
         path = self._dir / f"{record_id}.json"
         if not path.is_file():
             return None
-        return BrainstormRecord(**json.loads(path.read_text()))
+        return dict_to_brainstorm(json.loads(path.read_text()))
 
     def list_sessions(self) -> list[dict]:
         records: list[dict] = []
         for f in sorted(self._dir.glob("*.json"), reverse=True):
             try:
                 data = json.loads(f.read_text())
+                record = dict_to_brainstorm(data)
                 records.append({
                     "record_id": data.get("record_id", f.stem),
                     "project_name": data.get("project_name", ""),
                     "round_number": data.get("round_number", 0),
-                    "completeness": BrainstormRecord(**data).completeness_score(),
+                    "completeness": record.completeness_score(),
                     "created_at": data.get("created_at", ""),
                 })
             except Exception:
