@@ -489,6 +489,175 @@ class BrainstormManager:
                 )
                 node.explicit_checks[ec.field_name] = ec
 
+    # ---- Phase 2: 功能分解 ---------------------------------------------------
+
+    def get_active_node(self, record: BrainstormRecord) -> FeatureNode | None:
+        """返回当前正在探索的节点"""
+        return record.feature_tree.get_node(record.feature_tree.current_exploring_id)
+
+    def decompose_node(self, record: BrainstormRecord, children_names: list[str]) -> list[FeatureNode]:
+        """将当前节点拆分为子功能"""
+        active = self.get_active_node(record)
+        if not active:
+            return []
+
+        children: list[FeatureNode] = []
+        for name in children_names:
+            child = FeatureNode(
+                node_id=f"fn-{len(record.feature_tree.nodes):03d}",
+                name=name,
+                level="function" if active.level == "product" else "sub_function",
+                status="exploring",
+                parent_id=active.node_id,
+            )
+            record.feature_tree.add_child(active.node_id, child)
+            children.append(child)
+
+        active.status = "exploring"
+        return children
+
+    def build_question_plan(self, record: BrainstormRecord, node: FeatureNode) -> list[QuestionTask]:
+        """基于缺失项生成追问计划"""
+        tasks: list[QuestionTask] = []
+        missing = self._get_missing_items(node)
+
+        field_priority = [
+            ("user_stories", "用户故事", "As a X, I want Y, so that Z"),
+            ("mvp_scope", "MVP 范围", "第一版必须做什么"),
+            ("success_path", "成功路径", "操作步骤"),
+            ("failure_path", "失败路径", "失败场景和系统响应"),
+            ("edge_cases", "边界场景", "极端情况下的处理"),
+            ("data_requirements", "数据需求", "需要存储的数据"),
+            ("permission_rules", "权限规则", "谁可以做什么"),
+            ("business_rules", "业务规则", "业务约束"),
+            ("dependencies", "依赖关系", "依赖其他什么功能"),
+            ("acceptance_criteria", "验收标准", "Given/When/Then"),
+        ]
+
+        for field_name, label, shape in field_priority:
+            if field_name not in missing:
+                continue
+            tasks.append(QuestionTask(
+                question_id=f"qt-{node.node_id}-{field_name}",
+                node_id=node.node_id,
+                field_name=field_name,
+                question="",
+                reason=f"需要明确{label}，否则无法确认该功能的需求",
+                expected_answer_shape=shape,
+                status="pending",
+            ))
+
+        record.feature_tree.question_plan.extend(tasks)
+        return tasks
+
+    def check_granularity(self, record: BrainstormRecord) -> list[str]:
+        """检查粒度门控，返回缺失项"""
+        active = self.get_active_node(record)
+        if not active:
+            return ["no_active_node"]
+        return self._get_missing_items(active)
+
+    def _get_missing_items(self, node: FeatureNode) -> list[str]:
+        """返回节点未满足的字段"""
+        missing: list[str] = []
+        required = [
+            ("user_stories", lambda v: isinstance(v, list) and len(v) >= 1),
+            ("acceptance_criteria", lambda v: isinstance(v, list) and len(v) >= 1),
+            ("success_path", lambda v: isinstance(v, list) and len(v) >= 1),
+            ("failure_path", lambda v: isinstance(v, list) and len(v) >= 1),
+            ("edge_cases", lambda v: isinstance(v, list) and len(v) >= 1),
+            ("data_requirements", lambda v: isinstance(v, list) and len(v) >= 1),
+        ]
+
+        for field_name, check in required:
+            value = getattr(node, field_name, None)
+            if not check(value):
+                missing.append(field_name)
+
+        # 依赖、业务规则、权限规则需要显式评估记录
+        if "dependencies" not in node.explicit_checks:
+            missing.append("dependencies (未评估)")
+        if "business_rules" not in node.explicit_checks:
+            missing.append("business_rules (未评估)")
+        if "permission_rules" not in node.explicit_checks:
+            missing.append("permission_rules (未评估)")
+
+        return missing
+
+    def confirm_node(self, record: BrainstormRecord) -> bool:
+        """标记当前节点 confirmed，推进下一节点"""
+        active = self.get_active_node(record)
+        if not active:
+            return False
+
+        missing = self._get_missing_items(active)
+        if missing:
+            return False
+
+        active.status = "confirmed"
+        active.confirmed_at = _now_iso()
+
+        next_node = self.select_next_node(record)
+        return next_node is not None or record.feature_tree.all_confirmed()
+
+    def select_next_node(self, record: BrainstormRecord) -> FeatureNode | None:
+        """DFS 策略选下一个待探索节点"""
+        tree = record.feature_tree
+
+        active = tree.get_node(tree.current_exploring_id)
+        if active:
+            # 优先：当前节点的未探索子节点
+            for child_id in active.children:
+                child = tree.get_node(child_id)
+                if child and child.status in ("exploring", "pending"):
+                    tree.current_exploring_id = child_id
+                    tree.recursion_stack.append(child_id)
+                    return child
+
+            # 同级下一个
+            if active.parent_id:
+                parent = tree.get_node(active.parent_id)
+                if parent:
+                    idx = parent.children.index(active.node_id)
+                    for sibling_id in parent.children[idx + 1:]:
+                        sibling = tree.get_node(sibling_id)
+                        if sibling and sibling.status in ("exploring", "pending"):
+                            tree.current_exploring_id = sibling_id
+                            return sibling
+
+            # 回溯到父节点
+            if active.parent_id:
+                parent = tree.get_node(active.parent_id)
+                if parent and parent.status == "exploring":
+                    tree.current_exploring_id = parent.parent_id or parent.node_id
+                    if tree.recursion_stack:
+                        tree.recursion_stack.pop()
+                    return self.select_next_node(record)
+
+        # 其他未确认叶子
+        leaves = tree.unconfirmed_leaves()
+        if leaves:
+            tree.current_exploring_id = leaves[0].node_id
+            return leaves[0]
+
+        return None
+
+    def generate_node_questions(self, record: BrainstormRecord) -> list[str]:
+        """针对 active_node 生成追问"""
+        active = self.get_active_node(record)
+        if not active:
+            return []
+
+        missing = self._get_missing_items(active)
+        if not missing:
+            return []
+
+        # 重建追问计划
+        record.feature_tree.question_plan = []
+        self.build_question_plan(record, active)
+
+        return self._generate_questions_from_plan(record)
+
     # ---- 内部 -----------------------------------------------------------
 
     def _save(self, record: BrainstormRecord) -> None:

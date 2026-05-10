@@ -219,3 +219,65 @@ def test_phase1_check_complete(manager):
     )
     mgr = BrainstormManager.__new__(BrainstormManager)
     assert mgr._check_product_complete(root) is True
+
+
+# ── Phase 2: 功能分解测试 ──
+
+def test_phase2_get_active_node(manager):
+    record = manager.start_session("博客系统", "做一个博客")
+    active = manager.get_active_node(record)
+    assert active is not None
+    assert active.node_id == "fn-root"
+
+
+def test_phase2_decompose_node(manager):
+    record = manager.start_session("博客系统", "做一个博客")
+    children = manager.decompose_node(record, ["写文章", "评论系统", "标签管理"])
+    assert len(children) == 3
+    root = record.feature_tree.get_node("fn-root")
+    assert root.children == [c.node_id for c in children]
+    assert children[0].level == "function"
+
+
+def test_phase2_decompose_sub_function(manager):
+    record = manager.start_session("博客系统", "做一个博客")
+    children = manager.decompose_node(record, ["模块A"])
+    # 设置当前在模块A上
+    record.feature_tree.current_exploring_id = children[0].node_id
+    sub = manager.decompose_node(record, ["子功能1", "子功能2"])
+    assert len(sub) == 2
+    assert sub[0].level == "sub_function"
+
+
+def test_phase2_check_granularity(manager):
+    record = manager.start_session("博客系统", "做一个博客")
+    manager.decompose_node(record, ["写文章"])
+    record.feature_tree.current_exploring_id = record.feature_tree.get_node("fn-root").children[0]
+    missing = manager.check_granularity(record)
+    assert "user_stories" in missing
+    assert "acceptance_criteria" in missing
+
+
+def test_phase2_select_next_node(manager):
+    record = manager.start_session("博客系统", "做一个博客")
+    manager.decompose_node(record, ["写文章", "评论系统"])
+    next_node = manager.select_next_node(record)
+    assert next_node is not None
+    assert next_node.name == "写文章"
+
+
+def test_phase2_confirm_node_blocks_if_incomplete(manager):
+    record = manager.start_session("博客系统", "做一个博客")
+    manager.decompose_node(record, ["写文章"])
+    record.feature_tree.current_exploring_id = record.feature_tree.get_node("fn-root").children[0]
+    # 子节点缺少字段
+    result = manager.confirm_node(record)
+    assert result == False
+
+
+def test_phase2_generate_node_questions(manager):
+    record = manager.start_session("博客系统", "做一个博客")
+    manager.decompose_node(record, ["写文章"])
+    record.feature_tree.current_exploring_id = record.feature_tree.get_node("fn-root").children[0]
+    questions = manager.generate_node_questions(record)
+    assert len(questions) >= 1
