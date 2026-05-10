@@ -6,24 +6,47 @@
 
 import { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { MessageCircle, Send, RefreshCw, CheckCircle, HelpCircle, Route } from 'lucide-react';
+import { MessageCircle, Send, RefreshCw, CheckCircle, HelpCircle, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { listBrainstormSessions, startBrainstorm, brainstormRespond } from '@/lib/ralph-api';
 import { formatDate } from '@/lib/ralph-utils';
 import { toast } from 'sonner';
 import { useRalphStore } from '@/lib/ralph-store';
+import PhaseIndicator from '@/components/ralph/brainstorm/PhaseIndicator';
+import FeatureTreePanel from '@/components/ralph/brainstorm/FeatureTreePanel';
+import NodeDetailCard from '@/components/ralph/brainstorm/NodeDetailCard';
+import GranularityBadge from '@/components/ralph/brainstorm/GranularityBadge';
+import QuestionTracePanel from '@/components/ralph/brainstorm/QuestionTracePanel';
+import RelationshipGraph from '@/components/ralph/brainstorm/RelationshipGraph';
+import SpecPreview from '@/components/ralph/brainstorm/SpecPreview';
+import TaskHandoffPanel from '@/components/ralph/brainstorm/TaskHandoffPanel';
+import {
+  resumeSession, getFeatureTree, getSpecDocument, getQuestionPlan,
+  getTaskHandoffHints, generateTaskHandoffHints,
+} from '@/lib/brainstorm-api';
 
 export default function BrainstormPage() {
   const router = useRouter();
   const { currentProject } = useRalphStore();
   const checkedRef = useRef(false);
 
+  // V1 state
   const [sessions, setSessions] = useState<Record<string, unknown>[]>([]);
   const [activeSession, setActiveSession] = useState<Record<string, unknown> | null>(null);
   const [questions, setQuestions] = useState<string[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
+
+  // V2 state
+  const [phase, setPhase] = useState<string>('product_def');
+  const [featureTree, setFeatureTree] = useState<Record<string, unknown> | null>(null);
+  const [activeNode, setActiveNode] = useState<Record<string, unknown> | null>(null);
+  const [currentQuestion, setCurrentQuestion] = useState<Record<string, unknown> | null>(null);
+  const [granularityMissing, setGranularityMissing] = useState<string[]>([]);
+  const [specPreview, setSpecPreview] = useState<string>('');
+  const [handoffHints, setHandoffHints] = useState<Record<string, unknown>[]>([]);
+  const [showTree, setShowTree] = useState(true);
 
   const load = async () => {
     try { setSessions(await listBrainstormSessions()); } catch { toast.error('加载失败'); }
@@ -49,6 +72,14 @@ export default function BrainstormPage() {
       setActiveSession({ record_id: result.record_id });
       setQuestions(result.questions as string[]);
       setInput('');
+      // V2 state
+      if (result.phase) setPhase(result.phase);
+      if (result.feature_tree) {
+        setFeatureTree(result.feature_tree as Record<string, unknown>);
+        const exploringId = (result.feature_tree as Record<string, unknown>).current_exploring_id as string;
+        const nodes = (result.feature_tree as Record<string, unknown>).nodes as Record<string, Record<string, unknown>>;
+        if (exploringId && nodes?.[exploringId]) setActiveNode(nodes[exploringId]);
+      }
     } catch { toast.error('启动失败'); }
     finally { setLoading(false); }
   };
@@ -61,6 +92,15 @@ export default function BrainstormPage() {
       setActiveSession(result);
       setQuestions(result.questions as string[]);
       setInput('');
+      // V2 state updates
+      if (result.phase) setPhase(result.phase);
+      if (result.feature_tree) setFeatureTree(result.feature_tree as Record<string, unknown>);
+      if (result.active_node) {
+        const nodes = (result.feature_tree as Record<string, unknown>)?.nodes as Record<string, Record<string, unknown>>;
+        if (nodes?.[result.active_node as string]) setActiveNode(nodes[result.active_node as string]);
+      }
+      if (result.granularity_status) setGranularityMissing(result.granularity_status as string[]);
+      if (result.spec_preview) setSpecPreview(result.spec_preview as string);
       if (result.is_complete) {
         toast.success('需求共创完成！');
         await load();
@@ -72,17 +112,42 @@ export default function BrainstormPage() {
   const summary = activeSession?.summary as Record<string, unknown> | undefined;
 
   return (
-    <div className="max-w-4xl mx-auto px-6 py-5 flex flex-col h-full">
-      <div className="mb-5 flex-shrink-0">
-        <h1 className="text-lg font-semibold text-slate-900">需求共创</h1>
-        <p className="text-sm text-slate-500 mt-0.5">多轮深度对话，把需求问清问透</p>
-      </div>
+    <div className="flex flex-col h-full">
+      {/* Phase Indicator */}
+      {activeSession && <PhaseIndicator currentPhase={phase} />}
 
-      <div className="flex gap-5 flex-1 min-h-0">
-        {/* Main chat area */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* Feature Tree Panel (可折叠) */}
+        {featureTree && showTree && (
+          <div className="w-64 shrink-0">
+            <FeatureTreePanel
+              nodes={(featureTree.nodes as Record<string, Record<string, unknown>>) || {}}
+              rootId={(featureTree.root_id as string) || 'fn-root'}
+              activeNodeId={(featureTree.current_exploring_id as string) || ''}
+              onNodeClick={(id) => {
+                const nodes = featureTree.nodes as Record<string, Record<string, unknown>>;
+                if (nodes?.[id]) setActiveNode(nodes[id]);
+              }}
+            />
+          </div>
+        )}
+
+        {/* Chat Area */}
         <div className="flex-1 flex flex-col min-w-0">
+          {/* Question Trace */}
+          {currentQuestion && activeNode && (
+            <div className="flex-shrink-0 p-3">
+              <QuestionTracePanel
+                question={(currentQuestion.question as string) || ''}
+                nodeName={(activeNode.name as string) || ''}
+                fieldName={(currentQuestion.field_name as string) || ''}
+                reason={(currentQuestion.reason as string) || ''}
+              />
+            </div>
+          )}
+
           {!activeSession ? (
-            <div className="flex-1 flex flex-col items-center justify-center text-center">
+            <div className="flex-1 flex flex-col items-center justify-center text-center p-6">
               <MessageCircle size={32} className="text-slate-200 mb-4" />
               <p className="text-sm text-slate-600 mb-3">描述你想做的项目，我会慢慢问清楚</p>
               <div className="flex gap-2 w-full max-w-md">
@@ -99,7 +164,7 @@ export default function BrainstormPage() {
           ) : (
             <div className="flex-1 flex flex-col min-h-0">
               {/* Questions */}
-              <div className="flex-1 overflow-auto space-y-3 mb-4">
+              <div className="flex-1 overflow-auto space-y-3 p-4 mb-4">
                 {questions.map((q, i) => (
                   <div key={i} className="flex items-start gap-2 p-3 rounded-lg bg-blue-50 text-sm text-blue-800">
                     <HelpCircle size={14} className="mt-0.5 flex-shrink-0" />
@@ -115,7 +180,7 @@ export default function BrainstormPage() {
               </div>
 
               {/* Input */}
-              <div className="flex gap-2 flex-shrink-0">
+              <div className="flex gap-2 flex-shrink-0 p-4 border-t border-slate-700">
                 <input value={input} onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleRespond()}
                   placeholder="输入你的回答..."
@@ -129,41 +194,59 @@ export default function BrainstormPage() {
           )}
         </div>
 
-        {/* Side panel: session info */}
-        <div className="w-64 flex-shrink-0 space-y-3">
-          {activeSession && summary && (
-            <div className="rounded-lg border border-slate-200 bg-white p-4">
-              <h3 className="text-xs font-semibold text-slate-500 uppercase mb-2">当前会话</h3>
-              <p className="text-sm text-slate-700">第 {String(activeSession.round)} 轮</p>
-              <p className="text-xs text-slate-400 mt-1">完整度: {Math.round(Number(activeSession.completeness || 0) * 100)}%</p>
-              <div className="w-full h-1.5 bg-slate-100 rounded-full mt-2">
-                <div className="h-full bg-blue-500 rounded-full" style={{ width: `${Math.round(Number(activeSession.completeness || 0) * 100)}%` }} />
-              </div>
+        {/* Right Panel */}
+        {activeSession && (
+          <div className="w-80 shrink-0 border-l border-slate-700 overflow-y-auto p-4 space-y-4">
+            {activeNode && <NodeDetailCard node={activeNode as Record<string, unknown>} />}
+            {granularityMissing.length > 0 && <GranularityBadge missingItems={granularityMissing} />}
 
-              {Array.isArray(summary.confirmed_facts) && summary.confirmed_facts.length > 0 && (
-                <div className="mt-3">
-                  <p className="text-[10px] text-slate-400 uppercase">已确认事实</p>
-                  {(summary.confirmed_facts as Array<{ topic: string; fact: string }>).map((f, i) => (
-                    <p key={i} className="text-xs text-slate-600 mt-1"><strong>{f.topic}:</strong> {f.fact}</p>
-                  ))}
+            {phase === 'relationship' && featureTree && (
+              <RelationshipGraph edges={[]} conflicts={[]} />
+            )}
+
+            {phase === 'complete' && specPreview && (
+              <SpecPreview markdown={specPreview} />
+            )}
+
+            {phase === 'complete' && handoffHints.length > 0 && (
+              <TaskHandoffPanel hints={handoffHints} />
+            )}
+
+            {/* Session Info */}
+            <div className="p-3 bg-slate-800/50 rounded border border-slate-700">
+              <h3 className="text-sm font-semibold text-slate-300 mb-2">当前会话</h3>
+              <p className="text-xs text-slate-400">{activeSession.project_name as string}</p>
+              <div className="mt-2 flex items-center gap-2">
+                <span className="text-xs text-slate-500">完整度</span>
+                <div className="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                  <div className="h-full bg-emerald-500" style={{ width: `${Math.round(Number(activeSession.completeness || 0) * 100)}%` }} />
                 </div>
-              )}
+                <span className="text-xs text-slate-400">{Math.round(Number(activeSession.completeness || 0) * 100)}%</span>
+              </div>
             </div>
-          )}
 
-          {/* History */}
-          <div className="rounded-lg border border-slate-200 bg-white p-4">
-            <h3 className="text-xs font-semibold text-slate-500 uppercase mb-2">历史会话</h3>
-            {!loaded ? <p className="text-xs text-slate-400">加载中...</p> :
-             sessions.length === 0 ? <p className="text-xs text-slate-400">暂无</p> :
-             sessions.map((s) => (
-               <div key={s.record_id as string} className="py-1 border-b last:border-0">
-                 <p className="text-xs text-slate-700">{s.project_name as string}</p>
-                 <p className="text-[10px] text-slate-400">{s.round_number as number} 轮 · 完整度 {Math.round(Number(s.completeness || 0) * 100)}%</p>
-               </div>
-             ))}
+            {/* Export */}
+            {activeSession && (
+              <button className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm text-slate-300 transition-colors">
+                <Download className="w-4 h-4" />
+                导出 Spec
+              </button>
+            )}
+
+            {/* History */}
+            <div className="rounded-lg border border-slate-700 p-3">
+              <h3 className="text-xs font-semibold text-slate-400 uppercase mb-2">历史会话</h3>
+              {!loaded ? <p className="text-xs text-slate-500">加载中...</p> :
+               sessions.length === 0 ? <p className="text-xs text-slate-500">暂无</p> :
+               sessions.map((s) => (
+                 <div key={s.record_id as string} className="py-1 border-b border-slate-700 last:border-0">
+                   <p className="text-xs text-slate-300">{s.project_name as string}</p>
+                   <p className="text-[10px] text-slate-500">{s.round_number as number} 轮</p>
+                 </div>
+               ))}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
