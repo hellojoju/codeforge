@@ -1936,7 +1936,15 @@ def create_dashboard_app(
         )
         questions = mgr.generate_questions(record)
         summary = mgr.get_summary(record)
-        return {"record_id": record.record_id, "questions": questions, "summary": summary}
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "record_id": record.record_id,
+            "phase": record.current_phase,
+            "questions": questions,
+            "summary": summary,
+            "feature_tree": brainstorm_to_dict(record.feature_tree),
+            "active_node": record.feature_tree.current_exploring_id,
+        }
 
     @app.post("/api/ralph/brainstorm/respond")
     async def ralph_brainstorm_respond(body: dict[str, Any]) -> dict:
@@ -1951,12 +1959,133 @@ def create_dashboard_app(
                                         body.get("extracted_facts"))
         questions = mgr.generate_questions(updated)
         is_complete = mgr.is_complete(updated)
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        current_q = None
+        if updated.feature_tree.current_question_id:
+            for t in updated.feature_tree.question_plan:
+                if t.question_id == updated.feature_tree.current_question_id:
+                    current_q = brainstorm_to_dict(t)
+                    break
         return {
-            "record_id": updated.record_id, "round": updated.round_number,
-            "questions": questions, "is_complete": is_complete,
+            "record_id": updated.record_id,
+            "round": updated.round_number,
+            "phase": updated.current_phase,
+            "questions": questions,
+            "is_complete": is_complete,
             "completeness": updated.completeness_score(),
             "summary": mgr.get_summary(updated),
+            "feature_tree": brainstorm_to_dict(updated.feature_tree),
+            "active_node": updated.feature_tree.current_exploring_id,
+            "current_question": current_q,
+            "granularity_status": [],
+            "spec_preview": "",
         }
+
+    # --- Ralph API: Brainstorm V2 端点 ---
+
+    @app.get("/api/ralph/brainstorm/{record_id}/tree")
+    async def ralph_get_feature_tree(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {"feature_tree": brainstorm_to_dict(record.feature_tree)}
+
+    @app.get("/api/ralph/brainstorm/{record_id}/spec")
+    async def ralph_get_spec_document(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        return {"spec": mgr.generate_spec_document(record)}
+
+    @app.post("/api/ralph/brainstorm/{record_id}/resume")
+    async def ralph_resume_session(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.resume_session(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "record_id": record.record_id,
+            "phase": record.current_phase,
+            "feature_tree": brainstorm_to_dict(record.feature_tree),
+            "active_node": record.feature_tree.current_exploring_id,
+        }
+
+    @app.post("/api/ralph/brainstorm/{record_id}/advance")
+    async def ralph_advance_phase(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        success = mgr.advance_phase(record)
+        return {"success": success, "phase": record.current_phase}
+
+    @app.get("/api/ralph/brainstorm/{record_id}/relationships")
+    async def ralph_get_relationships(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return brainstorm_to_dict(record.relationship_graph)
+
+    @app.post("/api/ralph/brainstorm/{record_id}/review")
+    async def ralph_trigger_review(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.brainstorm_analyzer import BrainstormAnalyzer
+        analyzer = BrainstormAnalyzer(mgr._config)
+        result = analyzer.independent_review(record)
+        return {
+            "passed": result.passed,
+            "findings": [
+                {
+                    "finding_type": f.finding_type,
+                    "feature_id": f.feature_id,
+                    "description": f.description,
+                    "severity": f.severity,
+                }
+                for f in result.findings
+            ],
+        }
+
+    @app.get("/api/ralph/brainstorm/{record_id}/questions")
+    async def ralph_get_question_plan(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "question_plan": [brainstorm_to_dict(t) for t in record.feature_tree.question_plan],
+            "current_question_id": record.feature_tree.current_question_id,
+        }
+
+    @app.get("/api/ralph/brainstorm/{record_id}/handoff")
+    async def ralph_get_handoff_hints(record_id: str) -> list[dict]:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return [brainstorm_to_dict(h) for h in record.task_handoff_hints]
+
+    @app.post("/api/ralph/brainstorm/{record_id}/handoff/generate")
+    async def ralph_generate_handoff_hints(record_id: str) -> list[dict]:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.brainstorm_analyzer import BrainstormAnalyzer
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        analyzer = BrainstormAnalyzer(mgr._config)
+        hints = analyzer.generate_task_handoff_hints(record)
+        return [brainstorm_to_dict(h) for h in hints]
 
     # --- Ralph API: PRD 端点 ---
 
