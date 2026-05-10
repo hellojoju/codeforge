@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from ralph.schema.brainstorm_record import (
-    BrainstormRecord, ConfirmedFact, OpenAssumption, UserPath, _now_iso,
-    dict_to_brainstorm,
+    BrainstormPhase, BrainstormRecord, ConfirmedFact, FeatureNode, FeatureTree,
+    OpenAssumption, UserPath, _now_iso, brainstorm_to_dict, dict_to_brainstorm,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,12 +32,35 @@ class BrainstormManager:
     # ---- 会话生命周期 ---------------------------------------------------
 
     def start_session(self, project_name: str, user_message: str) -> BrainstormRecord:
-        record = BrainstormRecord(
-            record_id=f"bs-{_now_iso().replace(':', '-')}",
-            project_name=project_name,
-            round_number=1,
-            user_message=user_message,
+        """V2: 创建 session，初始化 product 根节点，进入 Phase 1"""
+        record_id = f"bs-{_now_iso().replace(':', '-')}"
+
+        # 创建 product 根节点
+        root_node = FeatureNode(
+            node_id="fn-root",
+            name=project_name,
+            level="product",
+            status="exploring",
+            depth=0,
         )
+
+        feature_tree = FeatureTree(
+            root_id="fn-root",
+            nodes={"fn-root": root_node},
+            current_exploring_id="fn-root",
+            question_plan=[],
+            current_question_id=None,
+        )
+
+        record = BrainstormRecord(
+            record_id=record_id,
+            project_name=project_name,
+            user_message=user_message,
+            current_phase=BrainstormPhase.PRODUCT_DEF,
+            feature_tree=feature_tree,
+            round_number=1,
+        )
+
         self._save(record)
         return record
 
@@ -59,10 +82,31 @@ class BrainstormManager:
                     "round_number": data.get("round_number", 0),
                     "completeness": record.completeness_score(),
                     "created_at": data.get("created_at", ""),
+                    "current_phase": data.get("current_phase", "product_def"),
+                    "active_node_name": self._get_active_node_name(data),
+                    "completed_features": self._count_confirmed_features(data),
                 })
             except Exception:
                 continue
         return records
+
+    def resume_session(self, record_id: str) -> BrainstormRecord | None:
+        """恢复 session，恢复 phase + active_node"""
+        return self.load(record_id)
+
+    def _get_active_node_name(self, data: dict) -> str:
+        """从数据中获取当前活跃节点名称"""
+        ft = data.get("feature_tree", {})
+        exploring_id = ft.get("current_exploring_id")
+        if exploring_id and exploring_id in ft.get("nodes", {}):
+            return ft["nodes"][exploring_id].get("name", "")
+        return ""
+
+    def _count_confirmed_features(self, data: dict) -> int:
+        """统计已确认的功能节点数"""
+        ft = data.get("feature_tree", {})
+        nodes = ft.get("nodes", {})
+        return sum(1 for n in nodes.values() if n.get("status") == "confirmed")
 
     # ---- 问题生成 -------------------------------------------------------
 
@@ -274,10 +318,9 @@ class BrainstormManager:
     # ---- 内部 -----------------------------------------------------------
 
     def _save(self, record: BrainstormRecord) -> None:
-        from dataclasses import asdict
         path = self._dir / f"{record.record_id}.json"
         path.write_text(json.dumps(
-            asdict(record),
+            brainstorm_to_dict(record),
             indent=2, ensure_ascii=False,
         ))
 

@@ -1,0 +1,170 @@
+import pytest
+from ralph.schema.brainstorm_record import (
+    FeatureNode, FeatureTree, BrainstormRecord, BrainstormPhase,
+    SourceRef, ExplicitCheck, QuestionTask,
+    RelationshipGraph, RelationshipEdge, ReviewResult, TaskHandoffHint,
+    ConfirmedFact, OpenAssumption, UserPath,
+)
+
+def test_feature_node_defaults():
+    node = FeatureNode(node_id="fn-001", name="测试", level="function")
+    assert node.status == "exploring"
+    assert node.depth == 0
+    assert node.children == []
+
+def test_feature_tree_add_child():
+    tree = FeatureTree()
+    root = FeatureNode(node_id="root", name="产品", level="product")
+    tree.nodes["root"] = root
+    child = FeatureNode(node_id="fn-001", name="功能A", level="function")
+    tree.add_child("root", child)
+    assert "fn-001" in tree.nodes
+    assert child.depth == 1
+    assert child.parent_id == "root"
+    assert "fn-001" in root.children
+
+def test_tree_all_confirmed_empty():
+    tree = FeatureTree()
+    assert tree.all_confirmed() == False
+
+def test_tree_all_confirmed_true():
+    tree = FeatureTree()
+    node = FeatureNode(node_id="fn-001", name="A", level="function", status="confirmed")
+    tree.nodes["fn-001"] = node
+    assert tree.all_confirmed() == True
+
+def test_completeness_score_v2():
+    record = BrainstormRecord(record_id="test", project_name="P")
+    n1 = FeatureNode(node_id="fn-001", name="A", level="function", status="confirmed")
+    n2 = FeatureNode(node_id="fn-002", name="B", level="function", status="exploring")
+    record.feature_tree.nodes = {"fn-001": n1, "fn-002": n2}
+    assert record.completeness_score() == 0.5
+
+def test_brainstorm_phase_enum():
+    assert BrainstormPhase.PRODUCT_DEF == "product_def"
+    assert BrainstormPhase.COMPLETE == "complete"
+
+def test_v1_completeness_fallback():
+    record = BrainstormRecord(
+        record_id="test", project_name="P",
+        confirmed_facts=[
+            ConfirmedFact(topic="目标用户", fact="用户", source_quote="q"),
+            ConfirmedFact(topic="核心功能", fact="功能", source_quote="q"),
+            ConfirmedFact(topic="验收标准", fact="标准", source_quote="q"),
+        ],
+    )
+    record.user_paths = [UserPath(name="test", steps=["a"])]
+    score = record.completeness_score()
+    assert score == 1.0
+
+def test_source_ref_defaults():
+    ref = SourceRef(turn_id="t1", quote="用户说...", field_name="target_user")
+    assert ref.confidence == 1.0
+
+def test_explicit_check_defaults():
+    check = ExplicitCheck(field_name="target_user", state="unknown")
+    assert check.reason == ""
+    assert check.source_refs == []
+
+def test_question_task_defaults():
+    task = QuestionTask(
+        question_id="q1", node_id="fn-001", field_name="roles",
+        question="谁会用？", reason="缺少角色信息", expected_answer_shape="列举角色",
+    )
+    assert task.status == "pending"
+    assert task.asked_at == ""
+
+def test_relationship_graph_defaults():
+    graph = RelationshipGraph()
+    assert graph.edges == []
+    assert graph.conflicts == []
+    assert graph.analyzed_at == ""
+
+def test_relationship_edge_creation():
+    edge = RelationshipEdge(
+        source_id="fn-001", target_id="fn-002",
+        edge_type="depends_on", description="A依赖B",
+    )
+    assert edge.edge_type == "depends_on"
+
+def test_review_result_defaults():
+    result = ReviewResult(passed=True)
+    assert result.findings == []
+    assert result.reviewed_at == ""
+
+def test_task_handoff_hint():
+    hint = TaskHandoffHint(
+        hint_id="h1", source_feature_id="fn-001",
+        suggested_task_boundaries=["边界1"],
+        likely_dependencies=["dep1"],
+    )
+    assert hint.risk_notes == []
+
+def test_tree_unconfirmed_leaves():
+    tree = FeatureTree()
+    n1 = FeatureNode(node_id="fn-001", name="A", level="function", status="exploring")
+    n2 = FeatureNode(node_id="fn-002", name="B", level="module", status="exploring", children=["fn-001"])
+    tree.nodes["fn-001"] = n1
+    tree.nodes["fn-002"] = n2
+    leaves = tree.unconfirmed_leaves()
+    assert len(leaves) == 1
+    assert leaves[0].node_id == "fn-001"
+
+def test_record_default_version():
+    record = BrainstormRecord(record_id="r1", project_name="Test")
+    assert record.version == 2
+    assert record.schema_version == "v2"
+    assert record.current_phase == "product_def"
+
+
+# ── V2 BrainstormManager 会话生命周期测试 ──
+
+import tempfile
+from pathlib import Path
+from ralph.brainstorm_manager import BrainstormManager
+
+
+@pytest.fixture
+def manager():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield BrainstormManager(Path(tmpdir))
+
+
+def test_v2_start_session(manager):
+    record = manager.start_session("测试项目", "我想做一个博客系统")
+    assert record.record_id.startswith("bs-")
+    assert record.current_phase == "product_def"
+    assert "fn-root" in record.feature_tree.nodes
+    assert record.feature_tree.current_exploring_id == "fn-root"
+    root = record.feature_tree.get_node("fn-root")
+    assert root.name == "测试项目"
+    assert root.level == "product"
+
+
+def test_v2_load_roundtrip(manager):
+    record = manager.start_session("Roundtrip项目", "测试加载")
+    loaded = manager.load(record.record_id)
+    assert loaded is not None
+    assert loaded.record_id == record.record_id
+    assert len(loaded.feature_tree.nodes) == 1
+
+
+def test_v2_resume_session(manager):
+    record = manager.start_session("Resume项目", "测试恢复")
+    resumed = manager.resume_session(record.record_id)
+    assert resumed is not None
+    assert resumed.current_phase == "product_def"
+
+
+def test_v2_resume_nonexistent(manager):
+    assert manager.resume_session("nonexistent") is None
+
+
+def test_v2_list_sessions(manager):
+    manager.start_session("项目A", "描述A")
+    manager.start_session("项目B", "描述B")
+    sessions = manager.list_sessions()
+    assert len(sessions) == 2
+    assert all("current_phase" in s for s in sessions)
+    assert all("active_node_name" in s for s in sessions)
+    assert all("completed_features" in s for s in sessions)
