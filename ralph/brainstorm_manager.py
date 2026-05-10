@@ -940,7 +940,7 @@ class BrainstormManager:
         # 审查结果
         if record.review_result:
             lines.extend(["## 独立审查", ""])
-            lines.append(f"**结果：** {'通过' if record.review_result.passed else '不通过'}", "")
+            lines.extend([f"**结果：** {'通过' if record.review_result.passed else '不通过'}", ""])
             for f in record.review_result.findings:
                 lines.append(f"- [{f.severity}] {f.description}")
             lines.append("")

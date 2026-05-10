@@ -3,7 +3,7 @@ from ralph.schema.brainstorm_record import (
     FeatureNode, FeatureTree, BrainstormRecord, BrainstormPhase,
     SourceRef, ExplicitCheck, QuestionTask,
     RelationshipGraph, RelationshipEdge, ReviewResult, TaskHandoffHint,
-    ConfirmedFact, OpenAssumption, UserPath,
+    ConfirmedFact, OpenAssumption, UserPath, _now_iso,
 )
 
 def test_feature_node_defaults():
@@ -398,3 +398,193 @@ def test_independent_review():
     result = analyzer.independent_review(record)
     assert result.passed is True
     assert record.review_result is result
+
+
+# ── E2E: Phase 1-4 完整流程测试 ──
+
+def _confirm_all_children(record):
+    """辅助：将当前 active node 的所有兄弟节点标记为 confirmed"""
+    root = record.feature_tree.get_node("fn-root")
+    for child_id in root.children:
+        child = record.feature_tree.get_node(child_id)
+        if child and child.status != "confirmed":
+            child.user_stories = ["As a 用户"]
+            child.acceptance_criteria = ["Given/When/Then"]
+            child.success_path = ["步骤1"]
+            child.failure_path = ["失败"]
+            child.edge_cases = ["边界"]
+            child.data_requirements = ["数据"]
+            child.explicit_checks["dependencies"] = ExplicitCheck(
+                field_name="dependencies", state="yes", reason="无依赖",
+            )
+            child.explicit_checks["business_rules"] = ExplicitCheck(
+                field_name="business_rules", state="no", reason="无业务规则",
+            )
+            child.explicit_checks["permission_rules"] = ExplicitCheck(
+                field_name="permission_rules", state="yes", reason="仅管理员",
+            )
+            child.status = "confirmed"
+            child.confirmed_at = _now_iso()
+
+
+def test_e2e_full_brainstorm_flow(manager):
+    """完整流程：Phase 1 → Phase 2 → Phase 3 → Phase 4 → Complete"""
+    # Phase 1: 产品定义
+    record = manager.start_session("测试项目", "我想做一个任务管理系统")
+    assert record.current_phase == "product_def"
+
+    # 补齐产品定义所有字段
+    root = record.feature_tree.get_node("fn-root")
+    root.vision = "高效的团队协作任务管理"
+    root.target_users = ["项目经理", "团队成员"]
+    root.roles = ["管理员", "普通用户"]
+    root.success_criteria = ["任务按时完成率提升30%"]
+    root.mvp_scope = ["创建任务", "分配任务", "查看状态"]
+    root.out_of_scope = ["甘特图", "时间追踪"]
+
+    assert manager._check_product_complete(root) is True
+    result = manager.advance_phase(record)
+    assert result is True
+    assert record.current_phase == "feature_decompose"
+
+    # Phase 2: 自动拆分后应该有子节点
+    assert len(root.children) > 0
+    record.feature_tree.current_exploring_id = root.children[0]
+
+    # 补全第一个子节点
+    first_child = record.feature_tree.get_node(root.children[0])
+    first_child.user_stories = [
+        "As a 管理员, 我想创建任务, 以便分配工作",
+    ]
+    first_child.acceptance_criteria = [
+        "Given 用户在任务页面 When 点击创建 Then 显示表单",
+    ]
+    first_child.success_path = ["打开任务页面", "填写标题", "点击保存"]
+    first_child.failure_path = ["标题为空", "显示错误提示"]
+    first_child.edge_cases = ["标题超长", "并发创建任务"]
+    first_child.data_requirements = [
+        "Task 表: id, title, status, assignee_id",
+    ]
+    first_child.explicit_checks["dependencies"] = ExplicitCheck(
+        field_name="dependencies", state="yes", reason="无依赖",
+    )
+    first_child.explicit_checks["business_rules"] = ExplicitCheck(
+        field_name="business_rules", state="no", reason="无业务规则",
+    )
+    first_child.explicit_checks["permission_rules"] = ExplicitCheck(
+        field_name="permission_rules", state="yes", reason="仅管理员可创建",
+    )
+    first_child.status = "confirmed"
+    first_child.confirmed_at = _now_iso()
+
+    # 其他子节点也全部确认
+    _confirm_all_children(record)
+
+    # 推进到关系分析
+    result = manager.advance_phase(record)
+    assert result is True
+    assert record.current_phase == "relationship"
+
+    # Phase 3: 关系分析
+    record.relationship_graph.analyzed_at = _now_iso()
+    result = manager.advance_phase(record)
+    assert result is True
+    assert record.current_phase == "independent_review"
+
+    # Phase 4: 独立审查
+    from ralph.brainstorm_analyzer import BrainstormAnalyzer
+    analyzer = BrainstormAnalyzer()
+    analyzer.independent_review(record)
+    result = manager.advance_phase(record)
+    assert result is True
+    assert record.current_phase == "complete"
+
+    # 验证 Spec 生成
+    spec = manager.generate_spec_document(record)
+    assert "测试项目" in spec
+
+    # 验证 Handoff 生成
+    hints = analyzer.generate_task_handoff_hints(record)
+    assert len(hints) >= 1
+
+
+def test_e2e_process_response_v2_routing(manager):
+    """测试 process_response_v2 的路由逻辑"""
+    record = manager.start_session("路由项目", "描述")
+    assert record.current_phase == "product_def"
+
+    # Phase 1 回复处理
+    manager._build_product_question_plan(record)
+    task = record.feature_tree.question_plan[0]
+    record.feature_tree.current_question_id = task.question_id
+    task.status = "asked"
+
+    manager.process_response_v2(record, "我的产品是任务管理系统")
+    # 应该在 Phase 1 继续（产品定义未补齐，advance_phase 返回 False）
+    assert record.current_phase == "product_def"
+
+    # 补齐产品定义后再次调用，应该能推进到 feature_decompose
+    root = record.feature_tree.get_node("fn-root")
+    root.vision = "任务管理"
+    root.target_users = ["用户"]
+    root.roles = ["管理员"]
+    root.success_criteria = ["高效"]
+    root.mvp_scope = ["核心"]
+    root.out_of_scope = ["其他"]
+
+    manager.process_response_v2(record, "补充信息")
+    assert record.current_phase == "feature_decompose"
+
+
+def test_e2e_spec_export_roundtrip(manager, tmp_path):
+    """Spec 导出往返测试"""
+    record = manager.start_session("导出项目", "测试")
+    root = record.feature_tree.get_node("fn-root")
+    root.vision = "测试愿景"
+    root.target_users = ["测试用户"]
+    root.roles = ["角色"]
+    root.success_criteria = ["标准"]
+    root.mvp_scope = ["范围"]
+    root.out_of_scope = ["不做"]
+
+    manager.advance_phase(record)
+
+    output = tmp_path / "spec.md"
+    path = manager.export_spec(record.record_id, str(output))
+    assert path.exists()
+    content = path.read_text()
+    assert "导出项目" in content
+    assert "测试愿景" in content
+
+
+def test_e2e_granularity_gate(manager):
+    """粒度门控：缺少字段时不能确认节点"""
+    record = manager.start_session("门控项目", "描述")
+    manager.decompose_node(record, ["功能A"])
+    root = record.feature_tree.get_node("fn-root")
+    record.feature_tree.current_exploring_id = root.children[0]
+
+    active = manager.get_active_node(record)
+    assert active is not None
+
+    # 缺少所有必填字段
+    missing = manager._get_missing_items(active)
+    assert len(missing) > 0
+
+    # confirm_node 应该返回 False
+    assert manager.confirm_node(record) is False
+
+    # 补全所有字段
+    active.user_stories = ["As a 用户"]
+    active.acceptance_criteria = ["Given/When/Then"]
+    active.success_path = ["步骤1"]
+    active.failure_path = ["失败"]
+    active.edge_cases = ["边界"]
+    active.data_requirements = ["数据"]
+    active.explicit_checks["dependencies"] = ExplicitCheck(field_name="dependencies", state="yes", reason="")
+    active.explicit_checks["business_rules"] = ExplicitCheck(field_name="business_rules", state="yes", reason="")
+    active.explicit_checks["permission_rules"] = ExplicitCheck(field_name="permission_rules", state="yes", reason="")
+
+    # 现在应该能确认
+    assert manager.confirm_node(record) is True
+    assert active.status == "confirmed"
