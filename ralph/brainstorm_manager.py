@@ -701,3 +701,168 @@ class BrainstormManager:
             "权限规则": "有哪些权限控制需求？",
         }
         return questions.get(topic, f"请详细说明「{topic}」方面的需求。")
+
+    # ---- Task B4: 状态机推进与 V2 路由 ---------------------------------------------------
+
+    def advance_phase(self, record: BrainstormRecord) -> bool:
+        """检查守卫条件，推进 phase"""
+        current = record.current_phase
+        now = _now_iso()
+
+        if current == BrainstormPhase.PRODUCT_DEF:
+            root = record.feature_tree.get_node("fn-root")
+            if not root or not self._check_product_complete(root):
+                return False
+            record.current_phase = BrainstormPhase.FEATURE_DECOMPOSE
+            # 自动拆分 product 节点
+            if not root.children:
+                self._auto_decompose_product(record)
+
+        elif current == BrainstormPhase.FEATURE_DECOMPOSE:
+            if not record.feature_tree.all_confirmed():
+                return False
+            record.current_phase = BrainstormPhase.RELATIONSHIP
+
+        elif current == BrainstormPhase.RELATIONSHIP:
+            if not record.relationship_graph.analyzed_at:
+                return False
+            record.current_phase = BrainstormPhase.INDEPENDENT_REVIEW
+
+        elif current == BrainstormPhase.INDEPENDENT_REVIEW:
+            if not record.review_result:
+                return False
+            if record.review_result.passed:
+                record.current_phase = BrainstormPhase.COMPLETE
+                record.completed_at = now
+            else:
+                record.current_phase = BrainstormPhase.CLARIFICATION
+
+        elif current == BrainstormPhase.CLARIFICATION:
+            clarifying = [n for n in record.feature_tree.nodes.values() if n.status == "needs_clarification"]
+            if not clarifying or all(n.status == "confirmed" for n in clarifying):
+                record.current_phase = BrainstormPhase.INDEPENDENT_REVIEW
+                record.review_result = None  # 重新审查
+
+        record.phase_history.append({"phase": record.current_phase, "at": now})
+        self._save(record)
+        return True
+
+    def _auto_decompose_product(self, record: BrainstormRecord) -> None:
+        """Phase 1 完成后自动拆分 product 为功能模块"""
+        root = record.feature_tree.get_node("fn-root")
+        if not root or root.children:
+            return
+
+        # 尝试 LLM 拆分
+        children_names = self._llm_decompose_node(record, root)
+        if not children_names:
+            # Fallback: 创建默认模块
+            children_names = ["核心功能", "用户管理"]
+
+        for name in children_names:
+            child = FeatureNode(
+                node_id=f"fn-{len(record.feature_tree.nodes):03d}",
+                name=name,
+                level="function",
+                status="exploring",
+            )
+            record.feature_tree.add_child(root.node_id, child)
+
+        record.feature_tree.current_exploring_id = root.children[0]
+
+    def _llm_decompose_node(self, record: BrainstormRecord, node: FeatureNode) -> list[str] | None:
+        """用 LLM 拆分功能节点"""
+        if self._config is None:
+            return None
+
+        prompt = f"""你是资深系统架构师。
+请将以下功能节点拆分为若干子功能：
+
+功能：{node.name}
+描述：{node.user_stories}
+
+拆分原则：
+1. 每个子功能应该是独立可开发、可测试的最小单元
+2. 子功能之间应该边界清晰
+3. 拆分粒度应该合理
+
+请以 JSON 数组返回子功能名称列表：["子功能1", "子功能2", ...]"""
+
+        try:
+            result = self._call_llm("decompose", [{"role": "user", "content": prompt}])
+            if result:
+                names = json.loads(result)
+                if isinstance(names, list) and names:
+                    return names
+        except Exception:
+            pass
+        return None
+
+    def process_response_v2(
+        self,
+        record: BrainstormRecord,
+        user_response: str,
+        extracted_facts: list[dict] | None = None,
+    ) -> BrainstormRecord:
+        """V2: 按 phase 路由处理用户回复"""
+        phase = record.current_phase
+
+        if phase == BrainstormPhase.PRODUCT_DEF:
+            self._process_product_response(record, user_response)
+
+        elif phase == BrainstormPhase.FEATURE_DECOMPOSE:
+            self._process_decompose_response(record, user_response, extracted_facts)
+
+        elif phase == BrainstormPhase.RELATIONSHIP:
+            self._process_relationship_response(record, user_response)
+
+        elif phase == BrainstormPhase.CLARIFICATION:
+            self._process_clarification_response(record, user_response)
+
+        # 尝试推进 phase
+        self.advance_phase(record)
+
+        # 保存
+        self._save(record)
+        return record
+
+    def _process_decompose_response(
+        self, record: BrainstormRecord, user_response: str, extracted_facts: list[dict] | None = None,
+    ) -> None:
+        """处理 Phase 2 回答"""
+        active = self.get_active_node(record)
+        if not active:
+            return
+
+        facts = extracted_facts or self._auto_extract_facts(record, user_response)
+        if facts:
+            self._apply_extracted_facts_to_node(record, active, facts)
+
+        # 检查粒度
+        missing = self._get_missing_items(active)
+        if missing:
+            # 继续追问
+            record.feature_tree.question_plan = []
+            self.build_question_plan(record, active)
+        else:
+            # 节点确认
+            self.confirm_node(record)
+            next_node = self.select_next_node(record)
+            if next_node:
+                record.feature_tree.current_exploring_id = next_node.node_id
+                self.build_question_plan(record, next_node)
+
+    def _process_relationship_response(self, record: BrainstormRecord, user_response: str) -> None:
+        """处理 Phase 3 回答"""
+        record.relationship_graph.analyzed_at = _now_iso()
+
+    def _process_clarification_response(self, record: BrainstormRecord, user_response: str) -> None:
+        """处理 Clarification 回答"""
+        clarifying = [n for n in record.feature_tree.nodes.values() if n.status == "needs_clarification"]
+        for node in clarifying:
+            node.status = "exploring"
+            node.review_feedback = []
+
+    def is_complete_v2(self, record: BrainstormRecord) -> bool:
+        """V2: current_phase == COMPLETE"""
+        return record.current_phase == BrainstormPhase.COMPLETE

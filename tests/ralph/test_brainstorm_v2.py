@@ -281,3 +281,44 @@ def test_phase2_generate_node_questions(manager):
     record.feature_tree.current_exploring_id = record.feature_tree.get_node("fn-root").children[0]
     questions = manager.generate_node_questions(record)
     assert len(questions) >= 1
+
+
+# ── Task B4: 状态机推进与 process_response_v2 ──
+
+def test_advance_phase_product_incomplete(manager):
+    record = manager.start_session("项目", "描述")
+    result = manager.advance_phase(record)
+    assert result is False
+    assert record.current_phase == "product_def"
+
+
+def test_advance_phase_product_to_decompose(manager):
+    record = manager.start_session("博客系统", "做一个博客")
+    root = record.feature_tree.get_node("fn-root")
+    root.vision = "技术博客"
+    root.target_users = ["开发者"]
+    root.roles = ["管理员"]
+    root.success_criteria = ["好"]
+    root.mvp_scope = ["写文章"]
+    root.out_of_scope = ["评论"]
+
+    result = manager.advance_phase(record)
+    assert result is True
+    assert record.current_phase == "feature_decompose"
+    # 自动拆分应该创建了子节点
+    assert len(root.children) > 0
+
+
+def test_process_response_v2_routes_to_phase(manager):
+    record = manager.start_session("博客系统", "做一个博客")
+    assert record.current_phase == "product_def"
+    # Phase 1 回复处理不应该报错
+    manager._process_product_response(record, "技术博客平台")
+    assert len(record.feature_tree.nodes) > 0
+
+
+def test_is_complete_v2(manager):
+    record = manager.start_session("项目", "描述")
+    assert manager.is_complete_v2(record) is False
+    record.current_phase = BrainstormPhase.COMPLETE
+    assert manager.is_complete_v2(record) is True
