@@ -120,6 +120,7 @@ def test_record_default_version():
 # ── V2 BrainstormManager 会话生命周期测试 ──
 
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from ralph.brainstorm_manager import BrainstormManager
 
@@ -168,3 +169,53 @@ def test_v2_list_sessions(manager):
     assert all("current_phase" in s for s in sessions)
     assert all("active_node_name" in s for s in sessions)
     assert all("completed_features" in s for s in sessions)
+
+
+# ── Phase 1: 产品定义测试 ──
+
+def test_phase1_build_question_plan(manager):
+    record = manager.start_session("博客系统", "我想做一个个人博客")
+    manager._build_product_question_plan(record)
+    assert len(record.feature_tree.question_plan) > 0
+    fields = [t.field_name for t in record.feature_tree.question_plan]
+    assert all(
+        f in ["vision", "target_users", "roles", "success_criteria", "mvp_scope", "out_of_scope"]
+        for f in fields
+    )
+
+
+def test_phase1_explore_product(manager):
+    record = manager.start_session("博客系统", "我想做一个个人博客")
+    questions = manager.explore_product(record)
+    assert len(questions) >= 1
+
+
+def test_phase1_process_response(manager):
+    record = manager.start_session("博客系统", "我想做一个个人博客")
+    manager._build_product_question_plan(record)
+    task = record.feature_tree.question_plan[0]
+    record.feature_tree.current_question_id = task.question_id
+    task.status = "asked"
+
+    manager._process_product_response(record, "我的产品是一个面向开发者的技术博客平台")
+    root = record.feature_tree.get_node("fn-root")
+    assert root is not None
+    assert len(root.conversation_turns) >= 1
+
+
+def test_phase1_check_complete_incomplete(manager):
+    record = manager.start_session("项目", "描述")
+    root = record.feature_tree.get_node("fn-root")
+    assert manager._check_product_complete(root) is False
+
+
+def test_phase1_check_complete(manager):
+    from ralph.schema.brainstorm_record import FeatureNode
+
+    root = FeatureNode(
+        node_id="fn-root", name="P", level="product", status="confirmed",
+        vision="一个好产品", target_users=["用户"], roles=["管理员"],
+        success_criteria=["成功"], mvp_scope=["核心功能"], out_of_scope=["不重要功能"],
+    )
+    mgr = BrainstormManager.__new__(BrainstormManager)
+    assert mgr._check_product_complete(root) is True

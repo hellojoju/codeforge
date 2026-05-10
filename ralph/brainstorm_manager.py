@@ -9,7 +9,7 @@ from typing import Any
 
 from ralph.schema.brainstorm_record import (
     BrainstormPhase, BrainstormRecord, ConfirmedFact, FeatureNode, FeatureTree,
-    OpenAssumption, UserPath, _now_iso, brainstorm_to_dict, dict_to_brainstorm,
+    OpenAssumption, QuestionTask, UserPath, _now_iso, brainstorm_to_dict, dict_to_brainstorm,
 )
 
 logger = logging.getLogger(__name__)
@@ -314,6 +314,180 @@ class BrainstormManager:
                 logger.warning("BrainstormManager: LLM 响应结构异常")
 
         return None
+
+    # ---- Phase 1: 产品定义 ---------------------------------------------------
+
+    def explore_product(self, record: BrainstormRecord) -> list[str]:
+        """Phase 1: 生成产品定义追问"""
+        root = record.feature_tree.get_node("fn-root")
+        if not root:
+            return ["请描述你的产品愿景"]
+
+        if not record.feature_tree.question_plan:
+            self._build_product_question_plan(record)
+
+        return self._generate_questions_from_plan(record)
+
+    def _build_product_question_plan(self, record: BrainstormRecord) -> None:
+        """为 Phase 1 构建追问计划"""
+        root = record.feature_tree.get_node("fn-root")
+        if not root:
+            return
+
+        product_fields = [
+            ("vision", "产品愿景", "这个产品要解决什么核心问题？"),
+            ("target_users", "目标用户", "谁会使用这个产品？"),
+            ("roles", "用户角色", "有几种用户角色？"),
+            ("success_criteria", "成功标准", "怎么判断这个产品是成功的？"),
+            ("mvp_scope", "MVP 范围", "第一版必须包含哪些功能？"),
+            ("out_of_scope", "明确不做", "第一版明确不包含什么？"),
+        ]
+
+        for field_name, label, reason in product_fields:
+            existing = getattr(root, field_name)
+            if existing and (
+                isinstance(existing, str) and existing.strip()
+                or isinstance(existing, list) and existing
+            ):
+                continue
+
+            task = QuestionTask(
+                question_id=f"qt-product-{field_name}",
+                node_id="fn-root",
+                field_name=field_name,
+                question="",
+                reason=reason,
+                expected_answer_shape="请用 1-3 句话描述",
+                status="pending",
+            )
+            record.feature_tree.question_plan.append(task)
+
+    def _generate_questions_from_plan(self, record: BrainstormRecord) -> list[str]:
+        """从 question_plan 中选择 pending 任务，生成问题"""
+        pending = [t for t in record.feature_tree.question_plan if t.status == "pending"]
+        if not pending:
+            return []
+
+        task = pending[0]
+        record.feature_tree.current_question_id = task.question_id
+        task.status = "asked"
+
+        question = self._render_question_with_llm(record, task)
+        if question:
+            return [question]
+
+        return [task.reason]
+
+    def _render_question_with_llm(self, record: BrainstormRecord, task: QuestionTask) -> str | None:
+        """用 LLM 将 QuestionTask 渲染为用户友好的问题"""
+        if self._config is None:
+            return None
+
+        root = record.feature_tree.get_node("fn-root")
+        source_refs = root.source_refs if root else []
+
+        prompt = f"""你是资深产品需求分析师。
+项目：{record.project_name}
+当前节点：{root.name if root else '产品定义'}
+字段：{task.field_name}
+追问原因：{task.reason}
+期望回答形态：{task.expected_answer_shape}
+相关用户原话：{[r.quote for r in source_refs]}
+
+请将以上信息改写为 1-2 个具体的追问。要求：
+1. 不要泛泛而问，必须点明当前产品。
+2. 引用用户的原话（如果有）。
+3. 如果用户可能不确定，提供"可以先标记为不确定"的出口。
+4. 只返回 JSON 数组格式的问题列表。"""
+
+        try:
+            result = self._call_llm("product_question", [{"role": "user", "content": prompt}])
+            if result:
+                questions = json.loads(result)
+                if isinstance(questions, list) and questions:
+                    return questions[0]
+        except Exception:
+            pass
+        return None
+
+    def _process_product_response(self, record: BrainstormRecord, user_response: str) -> None:
+        """处理 Phase 1 用户回复"""
+        from datetime import UTC, datetime
+
+        task_id = record.feature_tree.current_question_id
+        task = next(
+            (t for t in record.feature_tree.question_plan if t.question_id == task_id), None
+        )
+
+        root = record.feature_tree.get_node("fn-root")
+        if not root:
+            return
+
+        facts = self._auto_extract_facts(record, user_response)
+
+        if facts:
+            self._apply_extracted_facts_to_node(record, root, facts)
+
+        if task:
+            task.status = "answered"
+            task.answered_at = datetime.now(UTC).isoformat()
+
+        root.conversation_turns.append({
+            "question": task.reason if task else "",
+            "response": user_response,
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+
+        record.feature_tree.question_plan = []
+        self._build_product_question_plan(record)
+
+    def _check_product_complete(self, root: FeatureNode) -> bool:
+        """检查产品定义是否完整"""
+        required = [
+            "vision", "target_users", "roles", "success_criteria",
+            "mvp_scope", "out_of_scope",
+        ]
+        for fld in required:
+            value = getattr(root, fld, None)
+            if not value or (
+                isinstance(value, str) and not value.strip()
+            ) or (
+                isinstance(value, list) and not value
+            ):
+                return False
+        return True
+
+    def _apply_extracted_facts_to_node(
+        self, record: BrainstormRecord, node: FeatureNode, facts: dict,
+    ) -> None:
+        """将 LLM 提取的事实写入节点"""
+        for field_name in [
+            "user_stories", "acceptance_criteria", "success_path", "failure_path",
+            "edge_cases", "data_requirements", "dependencies", "business_rules",
+            "permission_rules", "vision", "target_users", "roles", "success_criteria",
+            "mvp_scope", "out_of_scope", "assumptions",
+        ]:
+            if field_name in facts and facts[field_name]:
+                value = facts[field_name]
+                existing = getattr(node, field_name)
+                if isinstance(existing, list) and isinstance(value, list):
+                    for item in value:
+                        if item not in existing:
+                            existing.append(item)
+                    setattr(node, field_name, existing)
+                elif isinstance(existing, str) and isinstance(value, str):
+                    if not existing:
+                        setattr(node, field_name, value)
+
+        if "explicit_checks" in facts:
+            from ralph.schema.brainstorm_record import ExplicitCheck
+            for check in facts["explicit_checks"]:
+                ec = ExplicitCheck(
+                    field_name=check.get("field_name", ""),
+                    state=check.get("state", "unknown"),
+                    reason=check.get("reason", ""),
+                )
+                node.explicit_checks[ec.field_name] = ec
 
     # ---- 内部 -----------------------------------------------------------
 
