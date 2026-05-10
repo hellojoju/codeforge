@@ -1915,19 +1915,21 @@ def create_dashboard_app(
 
     # --- Ralph API: Brainstorm 端点 ---
 
-    @app.get("/api/ralph/brainstorm/sessions")
-    async def ralph_list_brainstorm_sessions() -> list[dict]:
+    def _get_brainstorm_manager() -> "BrainstormManager":
+        """从 app.state 获取 config_manager 并创建 BrainstormManager。"""
+        from ralph.brainstorm_manager import BrainstormManager
+        from ralph.config_manager import RalphConfigManager
         cfg: RalphConfigManager = app.state.config_manager
         ralph_dir = cfg._dir.parent
-        from ralph.brainstorm_manager import BrainstormManager
-        return BrainstormManager(ralph_dir).list_sessions()
+        return BrainstormManager(ralph_dir, cfg)
+
+    @app.get("/api/ralph/brainstorm/sessions")
+    async def ralph_list_brainstorm_sessions() -> list[dict]:
+        return _get_brainstorm_manager().list_sessions()
 
     @app.post("/api/ralph/brainstorm/start")
     async def ralph_start_brainstorm(body: dict[str, Any]) -> dict:
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        from ralph.brainstorm_manager import BrainstormManager
-        mgr = BrainstormManager(ralph_dir)
+        mgr = _get_brainstorm_manager()
         record = mgr.start_session(
             body.get("project_name", "Unnamed"),
             body.get("user_message", ""),
@@ -1941,10 +1943,7 @@ def create_dashboard_app(
         record_id = body.get("record_id", "")
         if not record_id:
             raise HTTPException(status_code=422, detail="record_id required")
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        from ralph.brainstorm_manager import BrainstormManager
-        mgr = BrainstormManager(ralph_dir)
+        mgr = _get_brainstorm_manager()
         record = mgr.load(record_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Record not found")
