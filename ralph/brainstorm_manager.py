@@ -866,3 +866,95 @@ class BrainstormManager:
     def is_complete_v2(self, record: BrainstormRecord) -> bool:
         """V2: current_phase == COMPLETE"""
         return record.current_phase == BrainstormPhase.COMPLETE
+
+    # ---- 文档生成 -----------------------------------------------------------
+
+    def generate_spec_document(self, record: BrainstormRecord) -> str:
+        """渲染完整 Spec Document Markdown"""
+        lines = [f"# {record.project_name} - 需求规格文档", ""]
+
+        # 产品定义
+        root = record.feature_tree.get_node("fn-root")
+        if root:
+            lines.extend([
+                "## 产品定义", "",
+                f"**愿景：** {root.vision}", "",
+                f"**目标用户：** {', '.join(root.target_users) if root.target_users else '待明确'}", "",
+                f"**用户角色：** {', '.join(root.roles) if root.roles else '待明确'}", "",
+                f"**MVP 范围：** {', '.join(root.mvp_scope) if root.mvp_scope else '待明确'}", "",
+                f"**明确不做：** {', '.join(root.out_of_scope) if root.out_of_scope else '无'}", "",
+                f"**成功标准：** {', '.join(root.success_criteria) if root.success_criteria else '待明确'}", "",
+            ])
+
+        # 功能分解
+        lines.extend(["## 功能分解", ""])
+        for node in record.feature_tree.nodes.values():
+            if node.node_id == "fn-root" or node.level == "product":
+                continue
+            indent = "  " if node.level == "sub_function" else ""
+            status_icon = {"confirmed": "✅", "exploring": "\U0001f535", "pending": "⬜", "needs_clarification": "⚠️"}.get(node.status, "⬜")
+            lines.extend([
+                f"{indent}### {status_icon} {node.name}", "",
+                f"{indent}- **状态：** {node.status}", "",
+            ])
+            if node.user_stories:
+                lines.append(f"{indent}- **用户故事：**")
+                for s in node.user_stories:
+                    lines.append(f"{indent}  - {s}")
+                lines.append("")
+            if node.acceptance_criteria:
+                lines.append(f"{indent}- **验收标准：**")
+                for c in node.acceptance_criteria:
+                    lines.append(f"{indent}  - {c}")
+                lines.append("")
+            if node.success_path:
+                lines.append(f"{indent}- **成功路径：**")
+                for p in node.success_path:
+                    lines.append(f"{indent}  - {p}")
+                lines.append("")
+            if node.failure_path:
+                lines.append(f"{indent}- **失败路径：**")
+                for p in node.failure_path:
+                    lines.append(f"{indent}  - {p}")
+                lines.append("")
+            if node.edge_cases:
+                lines.append(f"{indent}- **边界场景：**")
+                for c in node.edge_cases:
+                    lines.append(f"{indent}  - {c}")
+                lines.append("")
+            if node.data_requirements:
+                lines.append(f"{indent}- **数据需求：**")
+                for d in node.data_requirements:
+                    lines.append(f"{indent}  - {d}")
+                lines.append("")
+            if node.dependencies:
+                lines.append(f"{indent}- **依赖：** {', '.join(node.dependencies)}", "")
+
+        # 关系分析
+        if record.relationship_graph.edges or record.relationship_graph.conflicts:
+            lines.extend(["## 关系分析", ""])
+            for edge in record.relationship_graph.edges:
+                lines.append(f"- {edge.source_id} {edge.edge_type} {edge.target_id}: {edge.description}")
+            lines.append("")
+
+        # 审查结果
+        if record.review_result:
+            lines.extend(["## 独立审查", ""])
+            lines.append(f"**结果：** {'通过' if record.review_result.passed else '不通过'}", "")
+            for f in record.review_result.findings:
+                lines.append(f"- [{f.severity}] {f.description}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def export_spec(self, record_id: str, output_path: str) -> Path:
+        """导出 Spec Document 到文件"""
+        record = self.load(record_id)
+        if not record:
+            raise ValueError(f"Record {record_id} not found")
+
+        spec = self.generate_spec_document(record)
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(spec, encoding="utf-8")
+        return path

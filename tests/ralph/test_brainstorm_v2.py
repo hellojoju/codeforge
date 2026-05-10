@@ -322,3 +322,79 @@ def test_is_complete_v2(manager):
     assert manager.is_complete_v2(record) is False
     record.current_phase = BrainstormPhase.COMPLETE
     assert manager.is_complete_v2(record) is True
+
+
+# ── Task B5: Spec 生成、导出与分析器测试 ──
+
+def test_generate_spec_document(manager):
+    record = manager.start_session("博客系统", "做一个博客")
+    spec = manager.generate_spec_document(record)
+    assert "博客系统" in spec
+    assert "产品定义" in spec
+
+
+def test_export_spec(manager, tmp_path):
+    record = manager.start_session("导出测试", "测试导出")
+    output = tmp_path / "spec.md"
+    path = manager.export_spec(record.record_id, str(output))
+    assert path.exists()
+    assert "导出测试" in path.read_text()
+
+
+def test_export_spec_nonexistent_record(manager, tmp_path):
+    with pytest.raises(ValueError, match="not found"):
+        manager.export_spec("nonexistent", str(tmp_path / "spec.md"))
+
+
+def test_generate_task_handoff_hints():
+    from ralph.brainstorm_analyzer import BrainstormAnalyzer
+
+    analyzer = BrainstormAnalyzer()
+
+    record = BrainstormRecord(record_id="test", project_name="P")
+    node = FeatureNode(
+        node_id="fn-001", name="用户登录", level="function", status="confirmed",
+        dependencies=["fn-002"],
+        source_refs=[SourceRef(turn_id="t1", quote="需要登录", field_name="name")],
+    )
+    record.feature_tree.nodes["fn-001"] = node
+
+    hints = analyzer.generate_task_handoff_hints(record)
+    assert len(hints) == 1
+    assert hints[0].source_feature_id == "fn-001"
+    assert "用户登录" in hints[0].suggested_task_boundaries
+
+
+def test_generate_task_handoff_hints_skips_unconfirmed():
+    from ralph.brainstorm_analyzer import BrainstormAnalyzer
+
+    analyzer = BrainstormAnalyzer()
+    record = BrainstormRecord(record_id="test", project_name="P")
+    record.feature_tree.nodes["fn-001"] = FeatureNode(
+        node_id="fn-001", name="未确认", level="function", status="exploring",
+    )
+    record.feature_tree.nodes["fn-002"] = FeatureNode(
+        node_id="fn-002", name="产品级", level="product", status="confirmed",
+    )
+    hints = analyzer.generate_task_handoff_hints(record)
+    assert len(hints) == 0
+
+
+def test_analyze_relationships():
+    from ralph.brainstorm_analyzer import BrainstormAnalyzer
+
+    analyzer = BrainstormAnalyzer()
+    record = BrainstormRecord(record_id="test", project_name="P")
+    graph = analyzer.analyze_relationships(record)
+    assert graph.analyzed_at != ""
+    assert record.relationship_graph is graph
+
+
+def test_independent_review():
+    from ralph.brainstorm_analyzer import BrainstormAnalyzer
+
+    analyzer = BrainstormAnalyzer()
+    record = BrainstormRecord(record_id="test", project_name="P")
+    result = analyzer.independent_review(record)
+    assert result.passed is True
+    assert record.review_result is result
