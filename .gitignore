@@ -27,3 +27,4 @@ dashboard-ui/.env.local
 # Project directories (user-generated content)
 project/
 workspaces/
+.worktrees/
