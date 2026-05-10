@@ -1934,7 +1934,10 @@ def create_dashboard_app(
             body.get("project_name", "Unnamed"),
             body.get("user_message", ""),
         )
-        questions = mgr.generate_questions(record)
+        # V2: 走 explore_product 路径，_render_question_with_llm 会调用 LLM
+        questions = mgr.explore_product(record)
+        if not questions:
+            questions = mgr.generate_questions(record, use_llm=True)
         summary = mgr.get_summary(record)
         from ralph.schema.brainstorm_record import brainstorm_to_dict
         return {
@@ -1955,10 +1958,24 @@ def create_dashboard_app(
         record = mgr.load(record_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Record not found")
-        updated = mgr.process_response(record, body.get("user_response", ""),
-                                        body.get("extracted_facts"))
-        questions = mgr.generate_questions(updated)
-        is_complete = mgr.is_complete(updated)
+        # V2: 走 process_response_v2 路径
+        updated = mgr.process_response_v2(record, body.get("user_response", ""),
+                                          body.get("extracted_facts"))
+        # 根据当前 phase 生成问题
+        phase_val = updated.current_phase.value if hasattr(updated.current_phase, "value") else str(updated.current_phase)
+        if phase_val == "product_def":
+            questions = mgr.explore_product(updated)
+        elif phase_val == "feature_decompose":
+            active = mgr.get_active_node(updated)
+            if active:
+                updated.feature_tree.question_plan = []
+                mgr.build_question_plan(updated, active)
+            questions = mgr.generate_questions(updated, use_llm=True)
+        else:
+            questions = mgr.generate_questions(updated, use_llm=True)
+        if not questions:
+            questions = ["请补充更多细节"]
+        is_complete = mgr.is_complete_v2(updated)
         from ralph.schema.brainstorm_record import brainstorm_to_dict
         current_q = None
         if updated.feature_tree.current_question_id:
@@ -1966,10 +1983,14 @@ def create_dashboard_app(
                 if t.question_id == updated.feature_tree.current_question_id:
                     current_q = brainstorm_to_dict(t)
                     break
+        granularity_missing = []
+        active_node = mgr.get_active_node(updated)
+        if active_node:
+            granularity_missing = mgr._get_missing_items(active_node)
         return {
             "record_id": updated.record_id,
             "round": updated.round_number,
-            "phase": updated.current_phase,
+            "phase": str(updated.current_phase),
             "questions": questions,
             "is_complete": is_complete,
             "completeness": updated.completeness_score(),
@@ -1977,7 +1998,7 @@ def create_dashboard_app(
             "feature_tree": brainstorm_to_dict(updated.feature_tree),
             "active_node": updated.feature_tree.current_exploring_id,
             "current_question": current_q,
-            "granularity_status": [],
+            "granularity_status": granularity_missing,
             "spec_preview": "",
         }
 
