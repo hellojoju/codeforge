@@ -867,6 +867,83 @@ class BrainstormManager:
         """V2: current_phase == COMPLETE"""
         return record.current_phase == BrainstormPhase.COMPLETE
 
+    # ---- 公开包装器（设计文档 §5 清单方法）-----------------------------------
+
+    def get_current_phase(self, record: BrainstormRecord) -> BrainstormPhase:
+        """§5.2 返回当前阶段"""
+        return record.current_phase
+
+    def confirm_product(self, record: BrainstormRecord) -> bool:
+        """§5.3 确认产品定义是否完整"""
+        return self._check_product_complete(record)
+
+    def select_next_question(self, record: BrainstormRecord) -> QuestionTask | None:
+        """§5.4 从 question_plan 中选择下一个未回答的问题"""
+        plan = record.feature_tree.question_plan or []
+        for q in plan:
+            if q.status in ("pending", "asked"):
+                return q
+        return None
+
+    def apply_extracted_facts(
+        self, record: BrainstormRecord, node_id: str, facts: list[dict]
+    ) -> None:
+        """§5.4 公开别名，将提取的事实应用到指定节点"""
+        node = record.feature_tree.get_node(node_id)
+        if node:
+            self._apply_extracted_facts_to_node(record, node, facts)
+
+    def clarify_nodes(self, record: BrainstormRecord) -> list[str]:
+        """§5.7 返回需要澄清的节点 ID 列表"""
+        return [
+            n.node_id for n in record.feature_tree.nodes.values()
+            if n.status == "needs_clarification"
+        ]
+
+    def re_review(self, record: BrainstormRecord) -> dict:
+        """§5.7 重新审查，返回审查结果摘要"""
+        from ralph.brainstorm_analyzer import BrainstormAnalyzer
+        analyzer = BrainstormAnalyzer()
+        result = analyzer.independent_review(record)
+        record.review_result = result
+        return {
+            "passed": result.passed,
+            "finding_count": len(result.findings),
+            "findings": [
+                {"severity": f.severity, "description": f.description}
+                for f in result.findings
+            ],
+        }
+
+    def check_handoff_readiness(self, record: BrainstormRecord) -> list[str]:
+        """§5.8 检查交接就绪度，返回缺口描述列表"""
+        gaps: list[str] = []
+        for node in record.feature_tree.nodes.values():
+            if node.level == "product":
+                continue
+            if node.status != "confirmed":
+                gaps.append(f"节点 '{node.name}' 尚未确认 (status={node.status})")
+        if not record.review_result or not record.review_result.passed:
+            gaps.append("独立审查未通过")
+        return gaps
+
+    def handoff_gaps(self, record: BrainstormRecord) -> list[str]:
+        """§5.8 识别交接缺口，返回具体缺失项"""
+        gaps: list[str] = []
+        missing_keys = [
+            "user_stories", "acceptance_criteria", "success_path",
+            "failure_path", "edge_cases", "data_requirements",
+            "dependencies", "business_rules", "permission_rules",
+        ]
+        for node in record.feature_tree.nodes.values():
+            if node.level == "product" or node.status != "confirmed":
+                continue
+            for key in missing_keys:
+                val = getattr(node, key, None)
+                if not val:
+                    gaps.append(f"节点 '{node.name}' 缺少 {key}")
+        return gaps
+
     # ---- 文档生成 -----------------------------------------------------------
 
     def generate_spec_document(self, record: BrainstormRecord) -> str:

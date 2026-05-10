@@ -588,3 +588,101 @@ def test_e2e_granularity_gate(manager):
     # 现在应该能确认
     assert manager.confirm_node(record) is True
     assert active.status == "confirmed"
+
+
+# ---- 新增公开包装器方法测试（设计文档 §5 清单）-------------------------------
+
+def _make_record_with_manager(tmp_path):
+    """辅助函数：创建 record 和 manager"""
+    from ralph.brainstorm_manager import BrainstormManager
+    manager = BrainstormManager(tmp_path)
+    root = FeatureNode(node_id="fn-root", name="测试产品", level="product", status="confirmed")
+    tree = FeatureTree(root_id="fn-root", nodes={"fn-root": root}, current_exploring_id="fn-root")
+    record = BrainstormRecord(
+        record_id="bs-test-001",
+        project_name="测试产品",
+        user_message="测试",
+        current_phase=BrainstormPhase.FEATURE_DECOMPOSE,
+        feature_tree=tree,
+    )
+    manager._save(record)
+    return manager, record
+
+
+def test_get_current_phase(tmp_path):
+    manager, record = _make_record_with_manager(tmp_path)
+    assert manager.get_current_phase(record) == BrainstormPhase.FEATURE_DECOMPOSE
+
+
+def test_confirm_product_wrapper(tmp_path):
+    manager, record = _make_record_with_manager(tmp_path)
+    # 未完整时应返回 False
+    assert manager.confirm_product(record) is False
+
+
+def test_select_next_question(tmp_path):
+    manager, record = _make_record_with_manager(tmp_path)
+    q1 = QuestionTask(question_id="q1", node_id="fn-root", field_name="test", question="问题1", reason="", expected_answer_shape="", status="pending")
+    q2 = QuestionTask(question_id="q2", node_id="fn-root", field_name="test", question="问题2", reason="", expected_answer_shape="", status="answered")
+    record.feature_tree.question_plan = [q2, q1]  # q2 已回答，应返回 q1
+    result = manager.select_next_question(record)
+    assert result.question_id == "q1"
+
+
+def test_select_next_question_all_answered(tmp_path):
+    manager, record = _make_record_with_manager(tmp_path)
+    q = QuestionTask(question_id="q1", node_id="fn-root", field_name="test", question="问题", reason="", expected_answer_shape="", status="answered")
+    record.feature_tree.question_plan = [q]
+    assert manager.select_next_question(record) is None
+
+
+def test_apply_extracted_facts_public(tmp_path):
+    manager, record = _make_record_with_manager(tmp_path)
+    root = record.feature_tree.nodes["fn-root"]
+    manager.apply_extracted_facts(record, "fn-root", {"vision": "新愿景"})
+    assert root.vision == "新愿景"
+
+
+def test_clarify_nodes(tmp_path):
+    manager, record = _make_record_with_manager(tmp_path)
+    fn1 = FeatureNode(node_id="fn-1", name="功能A", level="function", status="confirmed")
+    fn2 = FeatureNode(node_id="fn-2", name="功能B", level="function", status="needs_clarification")
+    record.feature_tree.nodes["fn-1"] = fn1
+    record.feature_tree.nodes["fn-2"] = fn2
+    result = manager.clarify_nodes(record)
+    assert result == ["fn-2"]
+
+
+def test_re_review(tmp_path):
+    manager, record = _make_record_with_manager(tmp_path)
+    result = manager.re_review(record)
+    assert "passed" in result
+    assert "finding_count" in result
+    assert "findings" in result
+    # review_result 应被更新
+    assert record.review_result is not None
+
+
+def test_check_handoff_readiness(tmp_path):
+    manager, record = _make_record_with_manager(tmp_path)
+    # 未确认节点 + 未审查 = 有缺口
+    fn = FeatureNode(node_id="fn-1", name="功能A", level="function", status="exploring")
+    record.feature_tree.nodes["fn-1"] = fn
+    gaps = manager.check_handoff_readiness(record)
+    assert len(gaps) > 0
+
+    # 确认后 + 通过审查 = 无缺口
+    fn.status = "confirmed"
+    record.review_result = ReviewResult(passed=True, findings=[])
+    gaps = manager.check_handoff_readiness(record)
+    assert gaps == []
+
+
+def test_handoff_gaps(tmp_path):
+    manager, record = _make_record_with_manager(tmp_path)
+    fn = FeatureNode(node_id="fn-1", name="功能A", level="function", status="confirmed")
+    record.feature_tree.nodes["fn-1"] = fn
+    gaps = manager.handoff_gaps(record)
+    # 确认但缺少所有字段
+    assert any("user_stories" in g for g in gaps)
+    assert any("acceptance_criteria" in g for g in gaps)

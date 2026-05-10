@@ -30,6 +30,16 @@ export async function triggerReview(recordId: string) {
   return res.json()
 }
 
+export async function triggerDecompose(recordId: string, childrenNames: string[] = []) {
+  const res = await fetch(`${BASE}/${recordId}/decompose`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ children_names: childrenNames }),
+  })
+  if (!res.ok) throw new Error(`Failed to trigger decompose: ${res.status}`)
+  return res.json()
+}
+
 export async function getQuestionPlan(recordId: string) {
   const res = await fetch(`${BASE}/${recordId}/questions`)
   if (!res.ok) throw new Error(`Failed to get questions: ${res.status}`)

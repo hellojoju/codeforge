@@ -2054,6 +2054,24 @@ def create_dashboard_app(
             ],
         }
 
+    @app.post("/api/ralph/brainstorm/{record_id}/decompose")
+    async def ralph_trigger_decompose(record_id: str, body: dict[str, Any] | None = None) -> dict:
+        """§7.2 触发功能节点分解"""
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        children_names = (body or {}).get("children_names", [])
+        if not isinstance(children_names, list):
+            children_names = [children_names] if children_names else []
+        mgr.decompose_node(record, children_names)
+        mgr._save(record)
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "feature_tree": brainstorm_to_dict(record.feature_tree),
+            "current_phase": record.current_phase.value,
+        }
+
     @app.get("/api/ralph/brainstorm/{record_id}/questions")
     async def ralph_get_question_plan(record_id: str) -> dict:
         mgr = _get_brainstorm_manager()
