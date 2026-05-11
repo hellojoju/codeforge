@@ -490,4 +490,18 @@ def register_ralph_extended_routes(app: FastAPI) -> APIRouter:
             releases.append({"name": p.stem, "changelog": p.read_text(encoding="utf-8")[:500], "created_at": _now_iso()})
         return releases
 
+    @router.get("/api/ralph/specs")
+    async def ralph_list_specs() -> list[dict]:
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        from ralph.spec_change_manager import SpecChangeManager
+        return SpecChangeManager(ralph_dir).list_specs()
+
+    @router.get("/api/ralph/contracts")
+    async def ralph_list_contracts() -> list[dict]:
+        cfg: RalphConfigManager = app.state.config_manager
+        ralph_dir = cfg._dir.parent
+        from ralph.contract_manager import ContractManager
+        return ContractManager(ralph_dir).list_contracts()
+
     return router

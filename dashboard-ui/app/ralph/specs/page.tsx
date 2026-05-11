@@ -9,7 +9,9 @@ export default function SpecsPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/ralph/specs').then(r => r.json()).then(setSpecs).catch(() => toast.error('加载失败')).finally(() => setLoading(false));
+    fetch('/api/ralph/specs').then(r => r.json()).then((data) => {
+      setSpecs(Array.isArray(data) ? data : []);
+    }).catch(() => toast.error('加载失败')).finally(() => setLoading(false));
   }, []);
 
   return (

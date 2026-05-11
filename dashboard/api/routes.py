@@ -347,13 +347,14 @@ def create_dashboard_app(
     app.state.repository = repository
 
     # 桥接 EventBus → WebSocket broadcast_queue
-    # EventBus 只负责内存队列（保持向后兼容），Repository 持久化在桥接层显式完成
-    _original_emit = event_bus.emit
-    def _wrapped_emit(event_type: str, **kwargs: Any) -> None:
-        _original_emit(event_type, **kwargs)
-        stored_event = repository.append_event(type=event_type, payload=kwargs)
-        _emit_to_ws(app.state.broadcast_queue, stored_event)
-    event_bus.emit = _wrapped_emit
+    # 热重载保护：event_bus 在 reload 时可能异常
+    if isinstance(event_bus, EventBus) and hasattr(event_bus, "emit") and callable(event_bus.emit):
+        _original_emit = event_bus.emit
+        def _wrapped_emit(event_type: str, **kwargs: Any) -> None:
+            _original_emit(event_type, **kwargs)
+            stored_event = repository.append_event(type=event_type, payload=kwargs)
+            _emit_to_ws(app.state.broadcast_queue, stored_event)
+        event_bus.emit = _wrapped_emit
 
     # 注入 CommandProcessor — 事件统一通过 Repository 追加
     def on_event(event: Event) -> None:

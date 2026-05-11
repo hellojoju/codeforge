@@ -9,7 +9,9 @@ export default function ContractsPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/ralph/contracts').then(r => r.json()).then(setContracts).catch(() => toast.error('加载失败')).finally(() => setLoading(false));
+    fetch('/api/ralph/contracts').then(r => r.json()).then((data) => {
+      setContracts(Array.isArray(data) ? data : []);
+    }).catch(() => toast.error('加载失败')).finally(() => setLoading(false));
   }, []);
 
   return (
