@@ -686,3 +686,51 @@ def test_handoff_gaps(tmp_path):
     # 确认但缺少所有字段
     assert any("user_stories" in g for g in gaps)
     assert any("acceptance_criteria" in g for g in gaps)
+
+
+def test_decompose_response_triggers_relationship_analysis(manager):
+    """Phase 2 所有节点确认后自动触发关系分析"""
+    record = manager.start_session("TestProject", "一个待办应用")
+
+    # 模拟 Phase 1 完成：填充产品定义
+    root = record.feature_tree.get_node("fn-root")
+    root.vision = "帮助团队管理任务"
+    root.target_users = ["团队成员"]
+    root.roles = ["管理员"]
+    root.success_criteria = ["每日完成率 > 80%"]
+    root.mvp_scope = ["创建任务"]
+    root.out_of_scope = ["甘特图"]
+
+    # 手动推进到 Phase 2
+    mgr = manager
+    mgr.advance_phase(record)
+    assert record.current_phase == "feature_decompose"
+
+    # 自动拆分后应该有子节点，补全并确认所有子节点
+    assert len(root.children) > 0
+    for child_id in root.children:
+        child = record.feature_tree.get_node(child_id)
+        if child:
+            child.user_stories = ["As a 成员, I want 创建任务"]
+            child.acceptance_criteria = ["Given 登录 When 创建 Then 出现在列表"]
+            child.success_path = ["用户创建任务"]
+            child.failure_path = ["网络断开，提示重试"]
+            child.edge_cases = ["同时创建多个任务"]
+            child.data_requirements = ["存储任务 ID 和标题"]
+            child.explicit_checks["dependencies"] = ExplicitCheck(
+                field_name="dependencies", state="yes", reason="无依赖",
+            )
+            child.explicit_checks["business_rules"] = ExplicitCheck(
+                field_name="business_rules", state="no", reason="无业务规则",
+            )
+            child.explicit_checks["permission_rules"] = ExplicitCheck(
+                field_name="permission_rules", state="yes", reason="仅管理员",
+            )
+            child.status = "confirmed"
+            child.confirmed_at = _now_iso()
+
+    # 模拟 respond 触发 decompose 处理
+    mgr.process_response_v2(record, "继续", extracted_facts=[])
+
+    # 验证关系分析已触发
+    assert record.relationship_graph.analyzed_at != ""

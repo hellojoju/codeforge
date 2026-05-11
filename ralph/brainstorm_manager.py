@@ -862,16 +862,38 @@ class BrainstormManager:
                 record.feature_tree.current_exploring_id = next_node.node_id
                 self.build_question_plan(record, next_node)
 
+        # 如果所有功能节点已确认，进入 Phase 3 并触发关系分析
+        if record.feature_tree.all_confirmed():
+            from ralph.brainstorm_analyzer import BrainstormAnalyzer
+            analyzer = BrainstormAnalyzer(self._config)
+            analyzer.analyze_relationships(record)
+
     def _process_relationship_response(self, record: BrainstormRecord, user_response: str) -> None:
-        """处理 Phase 3 回答"""
-        record.relationship_graph.analyzed_at = _now_iso()
+        """处理 Phase 3 回答，完成后自动触发独立审查"""
+        from ralph.brainstorm_analyzer import BrainstormAnalyzer
+
+        # 如果还没分析，先调用 LLM 分析
+        if not record.relationship_graph.analyzed_at:
+            analyzer = BrainstormAnalyzer(self._config)
+            analyzer.analyze_relationships(record)
+
+        # 分析完成后触发独立审查
+        if record.relationship_graph.analyzed_at:
+            analyzer = BrainstormAnalyzer(self._config)
+            result = analyzer.independent_review(record)
+            record.review_result = result
 
     def _process_clarification_response(self, record: BrainstormRecord, user_response: str) -> None:
-        """处理 Clarification 回答"""
+        """处理 Clarification 回答，澄清所有 needs_clarification 节点"""
         clarifying = [n for n in record.feature_tree.nodes.values() if n.status == "needs_clarification"]
         for node in clarifying:
             node.status = "exploring"
             node.review_feedback = []
+
+        # 如果所有澄清节点都已确认，重新审查
+        if all(n.status == "confirmed" for n in clarifying) or not clarifying:
+            record.current_phase = BrainstormPhase.INDEPENDENT_REVIEW
+            record.review_result = None  # 清空旧结果
 
     def is_complete_v2(self, record: BrainstormRecord) -> bool:
         """V2: current_phase == COMPLETE"""

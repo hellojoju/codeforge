@@ -1988,6 +1988,18 @@ def create_dashboard_app(
         active_node = mgr.get_active_node(updated)
         if active_node:
             granularity_missing = mgr._get_missing_items(active_node)
+        # COMPLETE 时生成 spec_preview 和 handoff_hints
+        spec_preview = ""
+        handoff_hints = []
+        if mgr.is_complete_v2(updated):
+            spec_preview = mgr.generate_spec_document(updated)
+            if not updated.task_handoff_hints:
+                from ralph.brainstorm_analyzer import BrainstormAnalyzer
+                analyzer = BrainstormAnalyzer(mgr._config)
+                hints = analyzer.generate_task_handoff_hints(updated)
+                updated.task_handoff_hints = hints
+                mgr._save(updated)
+            handoff_hints = [brainstorm_to_dict(h) for h in updated.task_handoff_hints]
         return {
             "record_id": updated.record_id,
             "round": updated.round_number,
@@ -2000,7 +2012,8 @@ def create_dashboard_app(
             "active_node": updated.feature_tree.current_exploring_id,
             "current_question": current_q,
             "granularity_status": granularity_missing,
-            "spec_preview": "",
+            "spec_preview": spec_preview,
+            "handoff_hints": handoff_hints,
         }
 
     # --- Ralph API: Brainstorm V2 端点 ---
