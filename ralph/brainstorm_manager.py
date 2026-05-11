@@ -163,7 +163,15 @@ class BrainstormManager:
         try:
             questions = json.loads(content)
             if isinstance(questions, list):
-                return [str(q) for q in questions[:5]]
+                result = []
+                for q in questions[:5]:
+                    if isinstance(q, str):
+                        result.append(q)
+                    elif isinstance(q, dict):
+                        val = q.get("question", "")
+                        if val:
+                            result.append(val)
+                return result
         except (json.JSONDecodeError, TypeError):
             logger.warning("BrainstormManager: LLM 返回的问题 JSON 解析失败")
 
@@ -405,7 +413,9 @@ class BrainstormManager:
             if result:
                 questions = json.loads(result)
                 if isinstance(questions, list) and questions:
-                    return questions[0]
+                    first = questions[0]
+                    # LLM 可能返回 ["..."] 或 [{"question": "..."}]
+                    return first if isinstance(first, str) else first.get("question", "")
         except Exception:
             pass
         return None
