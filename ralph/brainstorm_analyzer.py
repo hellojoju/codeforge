@@ -93,12 +93,93 @@ class BrainstormAnalyzer:
 
     def independent_review(self, record: BrainstormRecord) -> ReviewResult:
         """Phase 4: 独立 LLM 审查"""
-        from ralph.schema.brainstorm_record import _now_iso
-        # TODO: 实现 LLM 调用审查
+        spec_text = self._render_spec_for_review(record)
+
+        prompt = f"""你是独立需求质量审查员。你没有参与之前的需求共创对话。
+以下是一份完整的产品需求规格草案：
+
+{spec_text}
+
+请从以下 6 个维度审查：
+1. 粒度：每个功能点是否足够细，能直接拆成开发任务？
+2. 逻辑：用户路径是否有死胡同？失败路径是否覆盖所有异常？
+3. 一致性：功能之间是否有矛盾或重复？
+4. 边界：是否遗漏了重要的边界场景？
+5. 完整性：是否所有关键需求领域都已覆盖？
+6. 追溯性：每条确定需求是否能追溯用户原话或用户确认？
+
+请以 JSON 返回：
+{{
+  "passed": true/false,
+  "findings": [
+    {{
+      "finding_type": "too_coarse | logical_gap | inconsistency | missing_edge_case | incomplete | traceability_gap",
+      "feature_id": "...",
+      "description": "具体问题描述",
+      "severity": "critical | warning"
+    }}
+  ]
+}}"""
+
+        content = self._call_llm("independent_review", [{"role": "user", "content": prompt}])
+
         result = ReviewResult(passed=True, findings=[])
+        if content:
+            # 处理 markdown code fence
+            content = content.strip()
+            if content.startswith("```"):
+                lines = content.split("\n", 1)
+                content = lines[1].rsplit("```", 1)[0].strip() if len(lines) > 1 else content
+                if content.startswith("json"):
+                    content = content[4:].strip()
+            try:
+                data = json.loads(content)
+                result = ReviewResult(
+                    passed=data.get("passed", True),
+                    findings=[ReviewFinding(**f) for f in data.get("findings", [])],
+                )
+            except (json.JSONDecodeError, TypeError, KeyError) as e:
+                logger.warning("BrainstormAnalyzer: LLM review parse error: %s", e)
+
         result.reviewed_at = _now_iso()
         record.review_result = result
         return result
+
+    def _render_spec_for_review(self, record: BrainstormRecord) -> str:
+        """生成用于审查的 Spec Document"""
+        lines = [f"# {record.project_name} - 需求规格文档", ""]
+        root = record.feature_tree.get_node("fn-root")
+        if root:
+            lines.extend([
+                "## 产品定义", "",
+                f"**愿景：** {root.vision}", "",
+                f"**目标用户：** {', '.join(root.target_users) if root.target_users else '待明确'}", "",
+                f"**用户角色：** {', '.join(root.roles) if root.roles else '待明确'}", "",
+                f"**MVP 范围：** {', '.join(root.mvp_scope) if root.mvp_scope else '待明确'}", "",
+                f"**明确不做：** {', '.join(root.out_of_scope) if root.out_of_scope else '无'}", "",
+            ])
+        lines.extend(["## 功能分解", ""])
+        for node in record.feature_tree.nodes.values():
+            if node.level == "product":
+                continue
+            status_icon = {"confirmed": "[x]", "exploring": "[~]", "pending": "[ ]"}.get(node.status, "[ ]")
+            lines.append(f"### {status_icon} {node.name} ({node.node_id})")
+            if node.user_stories:
+                lines.append(f"- 用户故事: {'; '.join(node.user_stories)}")
+            if node.acceptance_criteria:
+                lines.append(f"- 验收标准: {'; '.join(node.acceptance_criteria)}")
+            if node.success_path:
+                lines.append(f"- 成功路径: {'; '.join(node.success_path)}")
+            if node.failure_path:
+                lines.append(f"- 失败路径: {'; '.join(node.failure_path)}")
+            if node.edge_cases:
+                lines.append(f"- 边界场景: {'; '.join(node.edge_cases)}")
+            if node.data_requirements:
+                lines.append(f"- 数据需求: {'; '.join(node.data_requirements)}")
+            if node.dependencies:
+                lines.append(f"- 依赖: {', '.join(node.dependencies)}")
+            lines.append("")
+        return "\n".join(lines)
 
     def generate_task_handoff_hints(self, record: BrainstormRecord) -> list[TaskHandoffHint]:
         """从已确认 FeatureNode 生成下游任务拆解提示"""
