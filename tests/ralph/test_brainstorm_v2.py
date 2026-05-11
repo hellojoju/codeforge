@@ -1,10 +1,22 @@
 import pytest
+
 from ralph.schema.brainstorm_record import (
-    FeatureNode, FeatureTree, BrainstormRecord, BrainstormPhase,
-    SourceRef, ExplicitCheck, QuestionTask,
-    RelationshipGraph, RelationshipEdge, ReviewResult, TaskHandoffHint,
-    ConfirmedFact, OpenAssumption, UserPath, _now_iso,
+    BrainstormPhase,
+    BrainstormRecord,
+    ConfirmedFact,
+    ExplicitCheck,
+    FeatureNode,
+    FeatureTree,
+    QuestionTask,
+    RelationshipEdge,
+    RelationshipGraph,
+    ReviewResult,
+    SourceRef,
+    TaskHandoffHint,
+    UserPath,
+    _now_iso,
 )
+
 
 def test_feature_node_defaults():
     node = FeatureNode(node_id="fn-001", name="测试", level="function")
@@ -120,8 +132,8 @@ def test_record_default_version():
 # ── V2 BrainstormManager 会话生命周期测试 ──
 
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
+
 from ralph.brainstorm_manager import BrainstormManager
 
 

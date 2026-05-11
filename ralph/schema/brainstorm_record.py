@@ -7,7 +7,7 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-class BrainstormPhase(str, Enum):
+class BrainstormPhase(str, Enum):  # noqa: SIM103  (StrEnum requires py3.11+)
     PRODUCT_DEF = "product_def"
     FEATURE_DECOMPOSE = "feature_decompose"
     RELATIONSHIP = "relationship"
@@ -265,7 +265,11 @@ class BrainstormRecord:
             if node.node_id == "fn-root" or node.level == "product":
                 continue
             indent = "  " if node.level == "sub_function" else ""
-            status_icon = {"confirmed": "✅", "exploring": "\U0001f535", "pending": "⬜", "needs_clarification": "⚠️"}.get(node.status, "⬜")
+            status_icons = {
+                "confirmed": "✅", "exploring": "\U0001f535",
+                "pending": "⬜", "needs_clarification": "⚠️",
+            }
+            status_icon = status_icons.get(node.status, "⬜")
             lines.extend([
                 f"{indent}### {status_icon} {node.name}", "",
                 f"{indent}- **状态：** {node.status}", "",
