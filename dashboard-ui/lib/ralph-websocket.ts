@@ -15,10 +15,11 @@ export class RalphWebSocket {
   private wsUrl: string;
   private ws: WebSocket | null = null;
   private handlers: Set<RalphEventHandler> = new Set();
+  private stateHandlers: Set<(connected: boolean) => void> = new Set();
   private lastSequence: number = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private reconnectDelay: number = 1000; // 初始重连延迟 1 秒
-  private readonly maxReconnectDelay: number = 30000; // 最大重连延迟 30 秒
+  private reconnectDelay: number = 1000;
+  private readonly maxReconnectDelay: number = 30000;
   private isManualDisconnect: boolean = false;
 
   constructor(baseUrl: string) {
@@ -63,8 +64,8 @@ export class RalphWebSocket {
     this.ws = new WebSocket(url);
 
     this.ws.onopen = () => {
-      // 连接成功，重置重连延迟
       this.reconnectDelay = 1000;
+      this.notifyStateHandlers(true);
     };
 
     this.ws.onmessage = (event: WebSocketMessage) => {
@@ -73,6 +74,7 @@ export class RalphWebSocket {
 
     this.ws.onclose = () => {
       if (!this.isManualDisconnect) {
+        this.notifyStateHandlers(false);
         this.scheduleReconnect();
       }
     };
@@ -160,6 +162,7 @@ export class RalphWebSocket {
    */
   disconnect(): void {
     this.isManualDisconnect = true;
+    this.notifyStateHandlers(false);
 
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -180,9 +183,28 @@ export class RalphWebSocket {
   on(handler: RalphEventHandler): () => void {
     this.handlers.add(handler);
 
-    // 返回取消订阅函数
     return () => {
       this.handlers.delete(handler);
     };
+  }
+
+  /**
+   * 注册连接状态变化监听器
+   */
+  onStateChange(handler: (connected: boolean) => void): () => void {
+    this.stateHandlers.add(handler);
+    return () => {
+      this.stateHandlers.delete(handler);
+    };
+  }
+
+  private notifyStateHandlers(connected: boolean): void {
+    for (const handler of this.stateHandlers) {
+      try {
+        handler(connected);
+      } catch {
+        // ignore
+      }
+    }
   }
 }

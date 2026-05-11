@@ -347,13 +347,14 @@ def create_dashboard_app(
     app.state.repository = repository
 
     # 桥接 EventBus → WebSocket broadcast_queue
-    # EventBus 只负责内存队列（保持向后兼容），Repository 持久化在桥接层显式完成
-    _original_emit = event_bus.emit
-    def _wrapped_emit(event_type: str, **kwargs: Any) -> None:
-        _original_emit(event_type, **kwargs)
-        stored_event = repository.append_event(type=event_type, payload=kwargs)
-        _emit_to_ws(app.state.broadcast_queue, stored_event)
-    event_bus.emit = _wrapped_emit
+    # 热重载保护：event_bus 在 reload 时可能异常
+    if isinstance(event_bus, EventBus) and hasattr(event_bus, "emit") and callable(event_bus.emit):
+        _original_emit = event_bus.emit
+        def _wrapped_emit(event_type: str, **kwargs: Any) -> None:
+            _original_emit(event_type, **kwargs)
+            stored_event = repository.append_event(type=event_type, payload=kwargs)
+            _emit_to_ws(app.state.broadcast_queue, stored_event)
+        event_bus.emit = _wrapped_emit
 
     # 注入 CommandProcessor — 事件统一通过 Repository 追加
     def on_event(event: Event) -> None:
@@ -1915,49 +1916,229 @@ def create_dashboard_app(
 
     # --- Ralph API: Brainstorm 端点 ---
 
-    @app.get("/api/ralph/brainstorm/sessions")
-    async def ralph_list_brainstorm_sessions() -> list[dict]:
+    def _get_brainstorm_manager() -> "BrainstormManager":
+        """从 app.state 获取 config_manager 并创建 BrainstormManager。"""
+        from ralph.brainstorm_manager import BrainstormManager
+        from ralph.config_manager import RalphConfigManager
         cfg: RalphConfigManager = app.state.config_manager
         ralph_dir = cfg._dir.parent
-        from ralph.brainstorm_manager import BrainstormManager
-        return BrainstormManager(ralph_dir).list_sessions()
+        return BrainstormManager(ralph_dir, cfg)
+
+    @app.get("/api/ralph/brainstorm/sessions")
+    async def ralph_list_brainstorm_sessions() -> list[dict]:
+        return _get_brainstorm_manager().list_sessions()
 
     @app.post("/api/ralph/brainstorm/start")
     async def ralph_start_brainstorm(body: dict[str, Any]) -> dict:
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        from ralph.brainstorm_manager import BrainstormManager
-        mgr = BrainstormManager(ralph_dir)
+        mgr = _get_brainstorm_manager()
         record = mgr.start_session(
             body.get("project_name", "Unnamed"),
             body.get("user_message", ""),
         )
-        questions = mgr.generate_questions(record)
+        # V2: 走 explore_product 路径，_render_question_with_llm 会调用 LLM
+        questions = mgr.explore_product(record)
+        if not questions:
+            questions = mgr.generate_questions(record, use_llm=True)
         summary = mgr.get_summary(record)
-        return {"record_id": record.record_id, "questions": questions, "summary": summary}
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "record_id": record.record_id,
+            "phase": record.current_phase,
+            "questions": questions,
+            "summary": summary,
+            "feature_tree": brainstorm_to_dict(record.feature_tree),
+            "active_node": record.feature_tree.current_exploring_id,
+        }
 
     @app.post("/api/ralph/brainstorm/respond")
     async def ralph_brainstorm_respond(body: dict[str, Any]) -> dict:
         record_id = body.get("record_id", "")
         if not record_id:
             raise HTTPException(status_code=422, detail="record_id required")
-        cfg: RalphConfigManager = app.state.config_manager
-        ralph_dir = cfg._dir.parent
-        from ralph.brainstorm_manager import BrainstormManager
-        mgr = BrainstormManager(ralph_dir)
+        mgr = _get_brainstorm_manager()
         record = mgr.load(record_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Record not found")
-        updated = mgr.process_response(record, body.get("user_response", ""),
-                                        body.get("extracted_facts"))
-        questions = mgr.generate_questions(updated)
-        is_complete = mgr.is_complete(updated)
+        # V2: 走 process_response_v2 路径
+        updated = mgr.process_response_v2(record, body.get("user_response", ""),
+                                          body.get("extracted_facts"))
+        # 根据当前 phase 生成问题
+        phase_val = updated.current_phase.value if hasattr(updated.current_phase, "value") else str(updated.current_phase)
+        if phase_val == "product_def":
+            questions = mgr.explore_product(updated)
+        elif phase_val == "feature_decompose":
+            active = mgr.get_active_node(updated)
+            if active:
+                updated.feature_tree.question_plan = []
+                mgr.build_question_plan(updated, active)
+            questions = mgr.generate_questions(updated, use_llm=True)
+        else:
+            questions = mgr.generate_questions(updated, use_llm=True)
+        if not questions:
+            questions = ["请补充更多细节"]
+        is_complete = mgr.is_complete_v2(updated)
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        current_q = None
+        if updated.feature_tree.current_question_id:
+            for t in updated.feature_tree.question_plan:
+                if t.question_id == updated.feature_tree.current_question_id:
+                    current_q = brainstorm_to_dict(t)
+                    break
+        granularity_missing = []
+        active_node = mgr.get_active_node(updated)
+        if active_node:
+            granularity_missing = mgr._get_missing_items(active_node)
+        # COMPLETE 时生成 spec_preview 和 handoff_hints
+        spec_preview = ""
+        handoff_hints = []
+        if mgr.is_complete_v2(updated):
+            spec_preview = mgr.generate_spec_document(updated)
+            if not updated.task_handoff_hints:
+                from ralph.brainstorm_analyzer import BrainstormAnalyzer
+                analyzer = BrainstormAnalyzer(mgr._config)
+                hints = analyzer.generate_task_handoff_hints(updated)
+                updated.task_handoff_hints = hints
+                mgr._save(updated)
+            handoff_hints = [brainstorm_to_dict(h) for h in updated.task_handoff_hints]
         return {
-            "record_id": updated.record_id, "round": updated.round_number,
-            "questions": questions, "is_complete": is_complete,
+            "record_id": updated.record_id,
+            "round": updated.round_number,
+            "phase": str(updated.current_phase),
+            "questions": questions,
+            "is_complete": is_complete,
             "completeness": updated.completeness_score(),
             "summary": mgr.get_summary(updated),
+            "feature_tree": brainstorm_to_dict(updated.feature_tree),
+            "active_node": updated.feature_tree.current_exploring_id,
+            "current_question": current_q,
+            "granularity_status": granularity_missing,
+            "spec_preview": spec_preview,
+            "handoff_hints": handoff_hints,
         }
+
+    # --- Ralph API: Brainstorm V2 端点 ---
+
+    @app.get("/api/ralph/brainstorm/{record_id}/tree")
+    async def ralph_get_feature_tree(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {"feature_tree": brainstorm_to_dict(record.feature_tree)}
+
+    @app.get("/api/ralph/brainstorm/{record_id}/spec")
+    async def ralph_get_spec_document(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        return {"spec": mgr.generate_spec_document(record)}
+
+    @app.post("/api/ralph/brainstorm/{record_id}/resume")
+    async def ralph_resume_session(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.resume_session(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "record_id": record.record_id,
+            "phase": record.current_phase,
+            "feature_tree": brainstorm_to_dict(record.feature_tree),
+            "active_node": record.feature_tree.current_exploring_id,
+        }
+
+    @app.post("/api/ralph/brainstorm/{record_id}/advance")
+    async def ralph_advance_phase(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        success = mgr.advance_phase(record)
+        return {"success": success, "phase": record.current_phase}
+
+    @app.get("/api/ralph/brainstorm/{record_id}/relationships")
+    async def ralph_get_relationships(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return brainstorm_to_dict(record.relationship_graph)
+
+    @app.post("/api/ralph/brainstorm/{record_id}/review")
+    async def ralph_trigger_review(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.brainstorm_analyzer import BrainstormAnalyzer
+        analyzer = BrainstormAnalyzer(mgr._config)
+        result = analyzer.independent_review(record)
+        return {
+            "passed": result.passed,
+            "findings": [
+                {
+                    "finding_type": f.finding_type,
+                    "feature_id": f.feature_id,
+                    "description": f.description,
+                    "severity": f.severity,
+                }
+                for f in result.findings
+            ],
+        }
+
+    @app.post("/api/ralph/brainstorm/{record_id}/decompose")
+    async def ralph_trigger_decompose(record_id: str, body: dict[str, Any] | None = None) -> dict:
+        """§7.2 触发功能节点分解"""
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        children_names = (body or {}).get("children_names", [])
+        if not isinstance(children_names, list):
+            children_names = [children_names] if children_names else []
+        mgr.decompose_node(record, children_names)
+        mgr._save(record)
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "feature_tree": brainstorm_to_dict(record.feature_tree),
+            "current_phase": record.current_phase.value,
+        }
+
+    @app.get("/api/ralph/brainstorm/{record_id}/questions")
+    async def ralph_get_question_plan(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "question_plan": [brainstorm_to_dict(t) for t in record.feature_tree.question_plan],
+            "current_question_id": record.feature_tree.current_question_id,
+        }
+
+    @app.get("/api/ralph/brainstorm/{record_id}/handoff")
+    async def ralph_get_handoff_hints(record_id: str) -> list[dict]:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return [brainstorm_to_dict(h) for h in record.task_handoff_hints]
+
+    @app.post("/api/ralph/brainstorm/{record_id}/handoff/generate")
+    async def ralph_generate_handoff_hints(record_id: str) -> list[dict]:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.brainstorm_analyzer import BrainstormAnalyzer
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        analyzer = BrainstormAnalyzer(mgr._config)
+        hints = analyzer.generate_task_handoff_hints(record)
+        return [brainstorm_to_dict(h) for h in hints]
 
     # --- Ralph API: PRD 端点 ---
 

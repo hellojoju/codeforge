@@ -26,8 +26,13 @@ export default function RalphLayout({ children }: { children: React.ReactNode })
 
   // WebSocket 连接
   useEffect(() => {
+    const { setConnected } = useRalphStore.getState();
     const ws = new RalphWebSocket('/ws/dashboard');
     wsRef.current = ws;
+
+    const unsubscribeState = ws.onStateChange((connected) => {
+      setConnected(connected);
+    });
 
     ws.connect();
 
@@ -36,6 +41,7 @@ export default function RalphLayout({ children }: { children: React.ReactNode })
     });
 
     return () => {
+      unsubscribeState();
       unsubscribe();
       ws.disconnect();
       wsRef.current = null;

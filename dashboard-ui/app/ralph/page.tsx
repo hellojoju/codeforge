@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import type { RalphEvent, WorkUnitStatus, RunStatus } from '@/lib/ralph-types';
 
 const ORDERED_STATUSES: WorkUnitStatus[] = ['running', 'needs_review', 'accepted', 'needs_rework', 'blocked', 'failed', 'ready', 'draft'];
@@ -48,7 +49,19 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
 // ==================== Welcome Screen ====================
 
 function WelcomeScreen() {
-  const { recentProjects } = useRalphStore();
+  const { recentProjects, setCurrentProject } = useRalphStore();
+  const router = useRouter();
+
+  const handleOpenProject = async (projectPath: string, projectName: string) => {
+    try {
+      const { openProject } = await import('@/lib/ralph-api');
+      await openProject(projectPath);
+      setCurrentProject({ name: projectName, path: projectPath });
+      router.push('/ralph');
+    } catch {
+      // silent
+    }
+  };
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[70vh] px-6">
@@ -99,7 +112,13 @@ function WelcomeScreen() {
                       <p className="text-xs text-slate-400">{formatDate(p.last_opened_at)}</p>
                     )}
                   </div>
-                  <ArrowRight size={14} className="text-slate-300" />
+                  <button
+                    onClick={() => handleOpenProject(p.path, p.name)}
+                    className="flex h-7 w-7 items-center justify-center rounded-md text-slate-300 hover:bg-blue-50 hover:text-blue-600 transition-colors"
+                    aria-label={`打开项目 ${p.name}`}
+                  >
+                    <ArrowRight size={14} />
+                  </button>
                 </div>
               ))}
             </div>

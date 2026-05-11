@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from ralph.schema.brainstorm_record import (
-    BrainstormRecord, ConfirmedFact, OpenAssumption, UserPath, _now_iso,
+    BrainstormPhase, BrainstormRecord, ConfirmedFact, FeatureNode, FeatureTree,
+    OpenAssumption, QuestionTask, UserPath, _now_iso, brainstorm_to_dict, dict_to_brainstorm,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,12 +32,35 @@ class BrainstormManager:
     # ---- 会话生命周期 ---------------------------------------------------
 
     def start_session(self, project_name: str, user_message: str) -> BrainstormRecord:
-        record = BrainstormRecord(
-            record_id=f"bs-{_now_iso().replace(':', '-')}",
-            project_name=project_name,
-            round_number=1,
-            user_message=user_message,
+        """V2: 创建 session，初始化 product 根节点，进入 Phase 1"""
+        record_id = f"bs-{_now_iso().replace(':', '-')}"
+
+        # 创建 product 根节点
+        root_node = FeatureNode(
+            node_id="fn-root",
+            name=project_name,
+            level="product",
+            status="exploring",
+            depth=0,
         )
+
+        feature_tree = FeatureTree(
+            root_id="fn-root",
+            nodes={"fn-root": root_node},
+            current_exploring_id="fn-root",
+            question_plan=[],
+            current_question_id=None,
+        )
+
+        record = BrainstormRecord(
+            record_id=record_id,
+            project_name=project_name,
+            user_message=user_message,
+            current_phase=BrainstormPhase.PRODUCT_DEF,
+            feature_tree=feature_tree,
+            round_number=1,
+        )
+
         self._save(record)
         return record
 
@@ -44,23 +68,45 @@ class BrainstormManager:
         path = self._dir / f"{record_id}.json"
         if not path.is_file():
             return None
-        return BrainstormRecord(**json.loads(path.read_text()))
+        return dict_to_brainstorm(json.loads(path.read_text()))
 
     def list_sessions(self) -> list[dict]:
         records: list[dict] = []
         for f in sorted(self._dir.glob("*.json"), reverse=True):
             try:
                 data = json.loads(f.read_text())
+                record = dict_to_brainstorm(data)
                 records.append({
                     "record_id": data.get("record_id", f.stem),
                     "project_name": data.get("project_name", ""),
                     "round_number": data.get("round_number", 0),
-                    "completeness": BrainstormRecord(**data).completeness_score(),
+                    "completeness": record.completeness_score(),
                     "created_at": data.get("created_at", ""),
+                    "current_phase": data.get("current_phase", "product_def"),
+                    "active_node_name": self._get_active_node_name(data),
+                    "completed_features": self._count_confirmed_features(data),
                 })
             except Exception:
                 continue
         return records
+
+    def resume_session(self, record_id: str) -> BrainstormRecord | None:
+        """恢复 session，恢复 phase + active_node"""
+        return self.load(record_id)
+
+    def _get_active_node_name(self, data: dict) -> str:
+        """从数据中获取当前活跃节点名称"""
+        ft = data.get("feature_tree", {})
+        exploring_id = ft.get("current_exploring_id")
+        if exploring_id and exploring_id in ft.get("nodes", {}):
+            return ft["nodes"][exploring_id].get("name", "")
+        return ""
+
+    def _count_confirmed_features(self, data: dict) -> int:
+        """统计已确认的功能节点数"""
+        ft = data.get("feature_tree", {})
+        nodes = ft.get("nodes", {})
+        return sum(1 for n in nodes.values() if n.get("status") == "confirmed")
 
     # ---- 问题生成 -------------------------------------------------------
 
@@ -117,7 +163,15 @@ class BrainstormManager:
         try:
             questions = json.loads(content)
             if isinstance(questions, list):
-                return [str(q) for q in questions[:5]]
+                result = []
+                for q in questions[:5]:
+                    if isinstance(q, str):
+                        result.append(q)
+                    elif isinstance(q, dict):
+                        val = q.get("question", "")
+                        if val:
+                            result.append(val)
+                return result
         except (json.JSONDecodeError, TypeError):
             logger.warning("BrainstormManager: LLM 返回的问题 JSON 解析失败")
 
@@ -269,13 +323,357 @@ class BrainstormManager:
 
         return None
 
+    # ---- Phase 1: 产品定义 ---------------------------------------------------
+
+    def explore_product(self, record: BrainstormRecord) -> list[str]:
+        """Phase 1: 生成产品定义追问"""
+        root = record.feature_tree.get_node("fn-root")
+        if not root:
+            return ["请描述你的产品愿景"]
+
+        if not record.feature_tree.question_plan:
+            self._build_product_question_plan(record)
+
+        return self._generate_questions_from_plan(record)
+
+    def _build_product_question_plan(self, record: BrainstormRecord) -> None:
+        """为 Phase 1 构建追问计划"""
+        root = record.feature_tree.get_node("fn-root")
+        if not root:
+            return
+
+        product_fields = [
+            ("vision", "产品愿景", "这个产品要解决什么核心问题？"),
+            ("target_users", "目标用户", "谁会使用这个产品？"),
+            ("roles", "用户角色", "有几种用户角色？"),
+            ("success_criteria", "成功标准", "怎么判断这个产品是成功的？"),
+            ("mvp_scope", "MVP 范围", "第一版必须包含哪些功能？"),
+            ("out_of_scope", "明确不做", "第一版明确不包含什么？"),
+        ]
+
+        for field_name, label, reason in product_fields:
+            existing = getattr(root, field_name)
+            if existing and (
+                isinstance(existing, str) and existing.strip()
+                or isinstance(existing, list) and existing
+            ):
+                continue
+
+            task = QuestionTask(
+                question_id=f"qt-product-{field_name}",
+                node_id="fn-root",
+                field_name=field_name,
+                question="",
+                reason=reason,
+                expected_answer_shape="请用 1-3 句话描述",
+                status="pending",
+            )
+            record.feature_tree.question_plan.append(task)
+
+    def _generate_questions_from_plan(self, record: BrainstormRecord) -> list[str]:
+        """从 question_plan 中选择 pending 任务，生成问题"""
+        pending = [t for t in record.feature_tree.question_plan if t.status == "pending"]
+        if not pending:
+            return []
+
+        task = pending[0]
+        record.feature_tree.current_question_id = task.question_id
+        task.status = "asked"
+
+        question = self._render_question_with_llm(record, task)
+        if question:
+            return [question]
+
+        return [task.reason]
+
+    def _render_question_with_llm(self, record: BrainstormRecord, task: QuestionTask) -> str | None:
+        """用 LLM 将 QuestionTask 渲染为用户友好的问题"""
+        if self._config is None:
+            return None
+
+        root = record.feature_tree.get_node("fn-root")
+        source_refs = root.source_refs if root else []
+
+        prompt = f"""你是资深产品需求分析师。
+项目：{record.project_name}
+当前节点：{root.name if root else '产品定义'}
+字段：{task.field_name}
+追问原因：{task.reason}
+期望回答形态：{task.expected_answer_shape}
+相关用户原话：{[r.quote for r in source_refs]}
+
+请将以上信息改写为 1-2 个具体的追问。要求：
+1. 不要泛泛而问，必须点明当前产品。
+2. 引用用户的原话（如果有）。
+3. 如果用户可能不确定，提供"可以先标记为不确定"的出口。
+4. 只返回 JSON 数组格式的问题列表。"""
+
+        try:
+            result = self._call_llm("product_question", [{"role": "user", "content": prompt}])
+            if result:
+                questions = json.loads(result)
+                if isinstance(questions, list) and questions:
+                    first = questions[0]
+                    # LLM 可能返回 ["..."] 或 [{"question": "..."}]
+                    return first if isinstance(first, str) else first.get("question", "")
+        except Exception:
+            pass
+        return None
+
+    def _process_product_response(self, record: BrainstormRecord, user_response: str) -> None:
+        """处理 Phase 1 用户回复"""
+        from datetime import UTC, datetime
+
+        task_id = record.feature_tree.current_question_id
+        task = next(
+            (t for t in record.feature_tree.question_plan if t.question_id == task_id), None
+        )
+
+        root = record.feature_tree.get_node("fn-root")
+        if not root:
+            return
+
+        facts = self._auto_extract_facts(record, user_response)
+
+        if facts:
+            self._apply_extracted_facts_to_node(record, root, facts)
+
+        if task:
+            task.status = "answered"
+            task.answered_at = datetime.now(UTC).isoformat()
+
+        root.conversation_turns.append({
+            "question": task.reason if task else "",
+            "response": user_response,
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+
+        record.feature_tree.question_plan = []
+        self._build_product_question_plan(record)
+
+    def _check_product_complete(self, root: FeatureNode) -> bool:
+        """检查产品定义是否完整"""
+        required = [
+            "vision", "target_users", "roles", "success_criteria",
+            "mvp_scope", "out_of_scope",
+        ]
+        for fld in required:
+            value = getattr(root, fld, None)
+            if not value or (
+                isinstance(value, str) and not value.strip()
+            ) or (
+                isinstance(value, list) and not value
+            ):
+                return False
+        return True
+
+    def _apply_extracted_facts_to_node(
+        self, record: BrainstormRecord, node: FeatureNode, facts: dict,
+    ) -> None:
+        """将 LLM 提取的事实写入节点"""
+        for field_name in [
+            "user_stories", "acceptance_criteria", "success_path", "failure_path",
+            "edge_cases", "data_requirements", "dependencies", "business_rules",
+            "permission_rules", "vision", "target_users", "roles", "success_criteria",
+            "mvp_scope", "out_of_scope", "assumptions",
+        ]:
+            if field_name in facts and facts[field_name]:
+                value = facts[field_name]
+                existing = getattr(node, field_name)
+                if isinstance(existing, list) and isinstance(value, list):
+                    for item in value:
+                        if item not in existing:
+                            existing.append(item)
+                    setattr(node, field_name, existing)
+                elif isinstance(existing, str) and isinstance(value, str):
+                    if not existing:
+                        setattr(node, field_name, value)
+
+        if "explicit_checks" in facts:
+            from ralph.schema.brainstorm_record import ExplicitCheck
+            for check in facts["explicit_checks"]:
+                ec = ExplicitCheck(
+                    field_name=check.get("field_name", ""),
+                    state=check.get("state", "unknown"),
+                    reason=check.get("reason", ""),
+                )
+                node.explicit_checks[ec.field_name] = ec
+
+    # ---- Phase 2: 功能分解 ---------------------------------------------------
+
+    def get_active_node(self, record: BrainstormRecord) -> FeatureNode | None:
+        """返回当前正在探索的节点"""
+        return record.feature_tree.get_node(record.feature_tree.current_exploring_id)
+
+    def decompose_node(self, record: BrainstormRecord, children_names: list[str]) -> list[FeatureNode]:
+        """将当前节点拆分为子功能"""
+        active = self.get_active_node(record)
+        if not active:
+            return []
+
+        children: list[FeatureNode] = []
+        for name in children_names:
+            child = FeatureNode(
+                node_id=f"fn-{len(record.feature_tree.nodes):03d}",
+                name=name,
+                level="function" if active.level == "product" else "sub_function",
+                status="exploring",
+                parent_id=active.node_id,
+            )
+            record.feature_tree.add_child(active.node_id, child)
+            children.append(child)
+
+        active.status = "exploring"
+        return children
+
+    def build_question_plan(self, record: BrainstormRecord, node: FeatureNode) -> list[QuestionTask]:
+        """基于缺失项生成追问计划"""
+        tasks: list[QuestionTask] = []
+        missing = self._get_missing_items(node)
+
+        field_priority = [
+            ("user_stories", "用户故事", "As a X, I want Y, so that Z"),
+            ("mvp_scope", "MVP 范围", "第一版必须做什么"),
+            ("success_path", "成功路径", "操作步骤"),
+            ("failure_path", "失败路径", "失败场景和系统响应"),
+            ("edge_cases", "边界场景", "极端情况下的处理"),
+            ("data_requirements", "数据需求", "需要存储的数据"),
+            ("permission_rules", "权限规则", "谁可以做什么"),
+            ("business_rules", "业务规则", "业务约束"),
+            ("dependencies", "依赖关系", "依赖其他什么功能"),
+            ("acceptance_criteria", "验收标准", "Given/When/Then"),
+        ]
+
+        for field_name, label, shape in field_priority:
+            if field_name not in missing:
+                continue
+            tasks.append(QuestionTask(
+                question_id=f"qt-{node.node_id}-{field_name}",
+                node_id=node.node_id,
+                field_name=field_name,
+                question="",
+                reason=f"需要明确{label}，否则无法确认该功能的需求",
+                expected_answer_shape=shape,
+                status="pending",
+            ))
+
+        record.feature_tree.question_plan.extend(tasks)
+        return tasks
+
+    def check_granularity(self, record: BrainstormRecord) -> list[str]:
+        """检查粒度门控，返回缺失项"""
+        active = self.get_active_node(record)
+        if not active:
+            return ["no_active_node"]
+        return self._get_missing_items(active)
+
+    def _get_missing_items(self, node: FeatureNode) -> list[str]:
+        """返回节点未满足的字段"""
+        missing: list[str] = []
+        required = [
+            ("user_stories", lambda v: isinstance(v, list) and len(v) >= 1),
+            ("acceptance_criteria", lambda v: isinstance(v, list) and len(v) >= 1),
+            ("success_path", lambda v: isinstance(v, list) and len(v) >= 1),
+            ("failure_path", lambda v: isinstance(v, list) and len(v) >= 1),
+            ("edge_cases", lambda v: isinstance(v, list) and len(v) >= 1),
+            ("data_requirements", lambda v: isinstance(v, list) and len(v) >= 1),
+        ]
+
+        for field_name, check in required:
+            value = getattr(node, field_name, None)
+            if not check(value):
+                missing.append(field_name)
+
+        # 依赖、业务规则、权限规则需要显式评估记录
+        if "dependencies" not in node.explicit_checks:
+            missing.append("dependencies (未评估)")
+        if "business_rules" not in node.explicit_checks:
+            missing.append("business_rules (未评估)")
+        if "permission_rules" not in node.explicit_checks:
+            missing.append("permission_rules (未评估)")
+
+        return missing
+
+    def confirm_node(self, record: BrainstormRecord) -> bool:
+        """标记当前节点 confirmed，推进下一节点"""
+        active = self.get_active_node(record)
+        if not active:
+            return False
+
+        missing = self._get_missing_items(active)
+        if missing:
+            return False
+
+        active.status = "confirmed"
+        active.confirmed_at = _now_iso()
+
+        next_node = self.select_next_node(record)
+        return next_node is not None or record.feature_tree.all_confirmed()
+
+    def select_next_node(self, record: BrainstormRecord) -> FeatureNode | None:
+        """DFS 策略选下一个待探索节点"""
+        tree = record.feature_tree
+
+        active = tree.get_node(tree.current_exploring_id)
+        if active:
+            # 优先：当前节点的未探索子节点
+            for child_id in active.children:
+                child = tree.get_node(child_id)
+                if child and child.status in ("exploring", "pending"):
+                    tree.current_exploring_id = child_id
+                    tree.recursion_stack.append(child_id)
+                    return child
+
+            # 同级下一个
+            if active.parent_id:
+                parent = tree.get_node(active.parent_id)
+                if parent:
+                    idx = parent.children.index(active.node_id)
+                    for sibling_id in parent.children[idx + 1:]:
+                        sibling = tree.get_node(sibling_id)
+                        if sibling and sibling.status in ("exploring", "pending"):
+                            tree.current_exploring_id = sibling_id
+                            return sibling
+
+            # 回溯到父节点
+            if active.parent_id:
+                parent = tree.get_node(active.parent_id)
+                if parent and parent.status == "exploring":
+                    tree.current_exploring_id = parent.parent_id or parent.node_id
+                    if tree.recursion_stack:
+                        tree.recursion_stack.pop()
+                    return self.select_next_node(record)
+
+        # 其他未确认叶子
+        leaves = tree.unconfirmed_leaves()
+        if leaves:
+            tree.current_exploring_id = leaves[0].node_id
+            return leaves[0]
+
+        return None
+
+    def generate_node_questions(self, record: BrainstormRecord) -> list[str]:
+        """针对 active_node 生成追问"""
+        active = self.get_active_node(record)
+        if not active:
+            return []
+
+        missing = self._get_missing_items(active)
+        if not missing:
+            return []
+
+        # 重建追问计划
+        record.feature_tree.question_plan = []
+        self.build_question_plan(record, active)
+
+        return self._generate_questions_from_plan(record)
+
     # ---- 内部 -----------------------------------------------------------
 
     def _save(self, record: BrainstormRecord) -> None:
-        from dataclasses import asdict
         path = self._dir / f"{record.record_id}.json"
         path.write_text(json.dumps(
-            asdict(record),
+            brainstorm_to_dict(record),
             indent=2, ensure_ascii=False,
         ))
 
@@ -313,3 +711,359 @@ class BrainstormManager:
             "权限规则": "有哪些权限控制需求？",
         }
         return questions.get(topic, f"请详细说明「{topic}」方面的需求。")
+
+    # ---- Task B4: 状态机推进与 V2 路由 ---------------------------------------------------
+
+    def advance_phase(self, record: BrainstormRecord) -> bool:
+        """检查守卫条件，推进 phase"""
+        current = record.current_phase
+        now = _now_iso()
+
+        if current == BrainstormPhase.PRODUCT_DEF:
+            root = record.feature_tree.get_node("fn-root")
+            if not root or not self._check_product_complete(root):
+                return False
+            record.current_phase = BrainstormPhase.FEATURE_DECOMPOSE
+            # 自动拆分 product 节点
+            if not root.children:
+                self._auto_decompose_product(record)
+
+        elif current == BrainstormPhase.FEATURE_DECOMPOSE:
+            if not record.feature_tree.all_confirmed():
+                return False
+            record.current_phase = BrainstormPhase.RELATIONSHIP
+
+        elif current == BrainstormPhase.RELATIONSHIP:
+            if not record.relationship_graph.analyzed_at:
+                return False
+            record.current_phase = BrainstormPhase.INDEPENDENT_REVIEW
+
+        elif current == BrainstormPhase.INDEPENDENT_REVIEW:
+            if not record.review_result:
+                return False
+            if record.review_result.passed:
+                record.current_phase = BrainstormPhase.COMPLETE
+                record.completed_at = now
+            else:
+                record.current_phase = BrainstormPhase.CLARIFICATION
+
+        elif current == BrainstormPhase.CLARIFICATION:
+            clarifying = [n for n in record.feature_tree.nodes.values() if n.status == "needs_clarification"]
+            if not clarifying or all(n.status == "confirmed" for n in clarifying):
+                record.current_phase = BrainstormPhase.INDEPENDENT_REVIEW
+                record.review_result = None  # 重新审查
+
+        record.phase_history.append({"phase": record.current_phase, "at": now})
+        self._save(record)
+        return True
+
+    def _auto_decompose_product(self, record: BrainstormRecord) -> None:
+        """Phase 1 完成后自动拆分 product 为功能模块"""
+        root = record.feature_tree.get_node("fn-root")
+        if not root or root.children:
+            return
+
+        # 尝试 LLM 拆分
+        children_names = self._llm_decompose_node(record, root)
+        if not children_names:
+            # Fallback: 创建默认模块
+            children_names = ["核心功能", "用户管理"]
+
+        for name in children_names:
+            child = FeatureNode(
+                node_id=f"fn-{len(record.feature_tree.nodes):03d}",
+                name=name,
+                level="function",
+                status="exploring",
+            )
+            record.feature_tree.add_child(root.node_id, child)
+
+        record.feature_tree.current_exploring_id = root.children[0]
+
+    def _llm_decompose_node(self, record: BrainstormRecord, node: FeatureNode) -> list[str] | None:
+        """用 LLM 拆分功能节点"""
+        if self._config is None:
+            return None
+
+        prompt = f"""你是资深系统架构师。
+请将以下功能节点拆分为若干子功能：
+
+功能：{node.name}
+描述：{node.user_stories}
+
+拆分原则：
+1. 每个子功能应该是独立可开发、可测试的最小单元
+2. 子功能之间应该边界清晰
+3. 拆分粒度应该合理
+
+请以 JSON 数组返回子功能名称列表：["子功能1", "子功能2", ...]"""
+
+        try:
+            result = self._call_llm("decompose", [{"role": "user", "content": prompt}])
+            if result:
+                names = json.loads(result)
+                if isinstance(names, list) and names:
+                    return names
+        except Exception:
+            pass
+        return None
+
+    def process_response_v2(
+        self,
+        record: BrainstormRecord,
+        user_response: str,
+        extracted_facts: list[dict] | None = None,
+    ) -> BrainstormRecord:
+        """V2: 按 phase 路由处理用户回复"""
+        phase = record.current_phase
+
+        if phase == BrainstormPhase.PRODUCT_DEF:
+            self._process_product_response(record, user_response)
+
+        elif phase == BrainstormPhase.FEATURE_DECOMPOSE:
+            self._process_decompose_response(record, user_response, extracted_facts)
+
+        elif phase == BrainstormPhase.RELATIONSHIP:
+            self._process_relationship_response(record, user_response)
+
+        elif phase == BrainstormPhase.CLARIFICATION:
+            self._process_clarification_response(record, user_response)
+
+        # 尝试推进 phase
+        self.advance_phase(record)
+
+        # 保存
+        self._save(record)
+        return record
+
+    def _process_decompose_response(
+        self, record: BrainstormRecord, user_response: str, extracted_facts: list[dict] | None = None,
+    ) -> None:
+        """处理 Phase 2 回答"""
+        active = self.get_active_node(record)
+        if not active:
+            return
+
+        facts = extracted_facts or self._auto_extract_facts(record, user_response)
+        if facts:
+            self._apply_extracted_facts_to_node(record, active, facts)
+
+        # 检查粒度
+        missing = self._get_missing_items(active)
+        if missing:
+            # 继续追问
+            record.feature_tree.question_plan = []
+            self.build_question_plan(record, active)
+        else:
+            # 节点确认
+            self.confirm_node(record)
+            next_node = self.select_next_node(record)
+            if next_node:
+                record.feature_tree.current_exploring_id = next_node.node_id
+                self.build_question_plan(record, next_node)
+
+        # 如果所有功能节点已确认，进入 Phase 3 并触发关系分析
+        if record.feature_tree.all_confirmed():
+            from ralph.brainstorm_analyzer import BrainstormAnalyzer
+            analyzer = BrainstormAnalyzer(self._config)
+            analyzer.analyze_relationships(record)
+
+    def _process_relationship_response(self, record: BrainstormRecord, user_response: str) -> None:
+        """处理 Phase 3 回答，完成后自动触发独立审查"""
+        from ralph.brainstorm_analyzer import BrainstormAnalyzer
+
+        # 如果还没分析，先调用 LLM 分析
+        if not record.relationship_graph.analyzed_at:
+            analyzer = BrainstormAnalyzer(self._config)
+            analyzer.analyze_relationships(record)
+
+        # 只在分析完成且尚未审查时触发一次独立审查
+        if record.relationship_graph.analyzed_at and not record.review_result:
+            analyzer = BrainstormAnalyzer(self._config)
+            result = analyzer.independent_review(record)
+            record.review_result = result
+
+    def _process_clarification_response(self, record: BrainstormRecord, user_response: str) -> None:
+        """处理 Clarification 回答，澄清所有 needs_clarification 节点"""
+        clarifying = [n for n in record.feature_tree.nodes.values() if n.status == "needs_clarification"]
+        for node in clarifying:
+            node.status = "exploring"
+            node.review_feedback = []
+
+        # 如果所有澄清节点都已确认，重新审查
+        if all(n.status == "confirmed" for n in clarifying) or not clarifying:
+            record.current_phase = BrainstormPhase.INDEPENDENT_REVIEW
+            record.review_result = None  # 清空旧结果
+
+    def is_complete_v2(self, record: BrainstormRecord) -> bool:
+        """V2: current_phase == COMPLETE"""
+        return record.current_phase == BrainstormPhase.COMPLETE
+
+    # ---- 公开包装器（设计文档 §5 清单方法）-----------------------------------
+
+    def get_current_phase(self, record: BrainstormRecord) -> BrainstormPhase:
+        """§5.2 返回当前阶段"""
+        return record.current_phase
+
+    def confirm_product(self, record: BrainstormRecord) -> bool:
+        """§5.3 确认产品定义是否完整"""
+        return self._check_product_complete(record)
+
+    def select_next_question(self, record: BrainstormRecord) -> QuestionTask | None:
+        """§5.4 从 question_plan 中选择下一个未回答的问题"""
+        plan = record.feature_tree.question_plan or []
+        for q in plan:
+            if q.status in ("pending", "asked"):
+                return q
+        return None
+
+    def apply_extracted_facts(
+        self, record: BrainstormRecord, node_id: str, facts: list[dict]
+    ) -> None:
+        """§5.4 公开别名，将提取的事实应用到指定节点"""
+        node = record.feature_tree.get_node(node_id)
+        if node:
+            self._apply_extracted_facts_to_node(record, node, facts)
+
+    def clarify_nodes(self, record: BrainstormRecord) -> list[str]:
+        """§5.7 返回需要澄清的节点 ID 列表"""
+        return [
+            n.node_id for n in record.feature_tree.nodes.values()
+            if n.status == "needs_clarification"
+        ]
+
+    def re_review(self, record: BrainstormRecord) -> dict:
+        """§5.7 重新审查，返回审查结果摘要"""
+        from ralph.brainstorm_analyzer import BrainstormAnalyzer
+        analyzer = BrainstormAnalyzer()
+        result = analyzer.independent_review(record)
+        record.review_result = result
+        return {
+            "passed": result.passed,
+            "finding_count": len(result.findings),
+            "findings": [
+                {"severity": f.severity, "description": f.description}
+                for f in result.findings
+            ],
+        }
+
+    def check_handoff_readiness(self, record: BrainstormRecord) -> list[str]:
+        """§5.8 检查交接就绪度，返回缺口描述列表"""
+        gaps: list[str] = []
+        for node in record.feature_tree.nodes.values():
+            if node.level == "product":
+                continue
+            if node.status != "confirmed":
+                gaps.append(f"节点 '{node.name}' 尚未确认 (status={node.status})")
+        if not record.review_result or not record.review_result.passed:
+            gaps.append("独立审查未通过")
+        return gaps
+
+    def handoff_gaps(self, record: BrainstormRecord) -> list[str]:
+        """§5.8 识别交接缺口，返回具体缺失项"""
+        gaps: list[str] = []
+        missing_keys = [
+            "user_stories", "acceptance_criteria", "success_path",
+            "failure_path", "edge_cases", "data_requirements",
+            "dependencies", "business_rules", "permission_rules",
+        ]
+        for node in record.feature_tree.nodes.values():
+            if node.level == "product" or node.status != "confirmed":
+                continue
+            for key in missing_keys:
+                val = getattr(node, key, None)
+                if not val:
+                    gaps.append(f"节点 '{node.name}' 缺少 {key}")
+        return gaps
+
+    # ---- 文档生成 -----------------------------------------------------------
+
+    def generate_spec_document(self, record: BrainstormRecord) -> str:
+        """渲染完整 Spec Document Markdown"""
+        lines = [f"# {record.project_name} - 需求规格文档", ""]
+
+        # 产品定义
+        root = record.feature_tree.get_node("fn-root")
+        if root:
+            lines.extend([
+                "## 产品定义", "",
+                f"**愿景：** {root.vision}", "",
+                f"**目标用户：** {', '.join(root.target_users) if root.target_users else '待明确'}", "",
+                f"**用户角色：** {', '.join(root.roles) if root.roles else '待明确'}", "",
+                f"**MVP 范围：** {', '.join(root.mvp_scope) if root.mvp_scope else '待明确'}", "",
+                f"**明确不做：** {', '.join(root.out_of_scope) if root.out_of_scope else '无'}", "",
+                f"**成功标准：** {', '.join(root.success_criteria) if root.success_criteria else '待明确'}", "",
+            ])
+
+        # 功能分解
+        lines.extend(["## 功能分解", ""])
+        for node in record.feature_tree.nodes.values():
+            if node.node_id == "fn-root" or node.level == "product":
+                continue
+            indent = "  " if node.level == "sub_function" else ""
+            status_icon = {"confirmed": "✅", "exploring": "\U0001f535", "pending": "⬜", "needs_clarification": "⚠️"}.get(node.status, "⬜")
+            lines.extend([
+                f"{indent}### {status_icon} {node.name}", "",
+                f"{indent}- **状态：** {node.status}", "",
+            ])
+            if node.user_stories:
+                lines.append(f"{indent}- **用户故事：**")
+                for s in node.user_stories:
+                    lines.append(f"{indent}  - {s}")
+                lines.append("")
+            if node.acceptance_criteria:
+                lines.append(f"{indent}- **验收标准：**")
+                for c in node.acceptance_criteria:
+                    lines.append(f"{indent}  - {c}")
+                lines.append("")
+            if node.success_path:
+                lines.append(f"{indent}- **成功路径：**")
+                for p in node.success_path:
+                    lines.append(f"{indent}  - {p}")
+                lines.append("")
+            if node.failure_path:
+                lines.append(f"{indent}- **失败路径：**")
+                for p in node.failure_path:
+                    lines.append(f"{indent}  - {p}")
+                lines.append("")
+            if node.edge_cases:
+                lines.append(f"{indent}- **边界场景：**")
+                for c in node.edge_cases:
+                    lines.append(f"{indent}  - {c}")
+                lines.append("")
+            if node.data_requirements:
+                lines.append(f"{indent}- **数据需求：**")
+                for d in node.data_requirements:
+                    lines.append(f"{indent}  - {d}")
+                lines.append("")
+            if node.dependencies:
+                lines.append(f"{indent}- **依赖：** {', '.join(node.dependencies)}", "")
+
+        # 关系分析
+        if record.relationship_graph.edges or record.relationship_graph.conflicts:
+            lines.extend(["## 关系分析", ""])
+            for edge in record.relationship_graph.edges:
+                lines.append(f"- {edge.source_id} {edge.edge_type} {edge.target_id}: {edge.description}")
+            lines.append("")
+
+        # 审查结果
+        if record.review_result:
+            lines.extend(["## 独立审查", ""])
+            lines.extend([f"**结果：** {'通过' if record.review_result.passed else '不通过'}", ""])
+            for f in record.review_result.findings:
+                lines.append(f"- [{f.severity}] {f.description}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def export_spec(self, record_id: str, output_path: str) -> Path:
+        """导出 Spec Document 到文件"""
+        record = self.load(record_id)
+        if not record:
+            raise ValueError(f"Record {record_id} not found")
+
+        spec = self.generate_spec_document(record)
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(spec, encoding="utf-8")
+        return path
