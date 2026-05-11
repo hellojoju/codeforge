@@ -178,6 +178,12 @@ class BrainstormAnalyzer:
                 lines.append(f"- 数据需求: {'; '.join(node.data_requirements)}")
             if node.dependencies:
                 lines.append(f"- 依赖: {', '.join(node.dependencies)}")
+            if node.business_rules:
+                lines.append(f"- 业务规则: {'; '.join(node.business_rules)}")
+            if node.permission_rules:
+                lines.append(f"- 权限规则: {'; '.join(node.permission_rules)}")
+            if node.assumptions:
+                lines.append(f"- 假设: {'; '.join(node.assumptions)}")
             lines.append("")
         return "\n".join(lines)
 
