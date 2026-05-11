@@ -877,8 +877,8 @@ class BrainstormManager:
             analyzer = BrainstormAnalyzer(self._config)
             analyzer.analyze_relationships(record)
 
-        # 分析完成后触发独立审查
-        if record.relationship_graph.analyzed_at:
+        # 只在分析完成且尚未审查时触发一次独立审查
+        if record.relationship_graph.analyzed_at and not record.review_result:
             analyzer = BrainstormAnalyzer(self._config)
             result = analyzer.independent_review(record)
             record.review_result = result
