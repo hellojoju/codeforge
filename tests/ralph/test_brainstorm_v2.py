@@ -333,6 +333,40 @@ def test_generate_spec_document(manager):
     assert "产品定义" in spec
 
 
+def test_brainstorm_record_to_spec_document():
+    record = BrainstormRecord(record_id="test", project_name="SchemaSpecTest")
+    root = FeatureNode(node_id="fn-root", name="SchemaSpecTest", level="product", status="confirmed")
+    root.vision = "测试愿景"
+    root.target_users = ["测试用户"]
+    root.roles = ["管理员"]
+    root.mvp_scope = ["发文章"]
+    root.success_criteria = ["好用"]
+    record.feature_tree.nodes["fn-root"] = root
+
+    fn = FeatureNode(node_id="fn-001", name="发文", level="function", status="confirmed")
+    fn.user_stories = ["作为用户我要发文"]
+    fn.acceptance_criteria = ["能保存"]
+    record.feature_tree.nodes["fn-001"] = fn
+
+    record.review_result = ReviewResult(passed=True, reviewed_at=_now_iso())
+
+    spec = record.to_spec_document()
+    assert "SchemaSpecTest" in spec
+    assert "产品定义" in spec
+    assert "测试愿景" in spec
+    assert "功能分解" in spec
+    assert "发文" in spec
+    assert "独立审查" in spec
+    assert "通过" in spec
+
+
+def test_to_spec_document_matches_manager(manager):
+    record = manager.start_session("对齐测试", "测试Manager和schema输出一致")
+    manager_spec = manager.generate_spec_document(record)
+    schema_spec = record.to_spec_document()
+    assert manager_spec == schema_spec
+
+
 def test_export_spec(manager, tmp_path):
     record = manager.start_session("导出测试", "测试导出")
     output = tmp_path / "spec.md"
