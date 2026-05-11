@@ -101,6 +101,7 @@ export default function BrainstormPage() {
       }
       if (result.granularity_status) setGranularityMissing(result.granularity_status as string[]);
       if (result.spec_preview) setSpecPreview(result.spec_preview as string);
+      if (result.handoff_hints) setHandoffHints(result.handoff_hints as Record<string, unknown>[]);
       if (result.is_complete) {
         toast.success('需求共创完成！');
         await load();
@@ -204,8 +205,8 @@ export default function BrainstormPage() {
               <RelationshipGraph edges={[]} conflicts={[]} />
             )}
 
-            {phase === 'complete' && specPreview && (
-              <SpecPreview markdown={specPreview} />
+            {phase === 'complete' && (specPreview || activeSession?.is_complete) && (
+              <SpecPreview markdown={specPreview || '需求已完整，正在生成 Spec 文档...'} />
             )}
 
             {phase === 'complete' && handoffHints.length > 0 && (
@@ -227,7 +228,14 @@ export default function BrainstormPage() {
 
             {/* Export */}
             {activeSession && (
-              <button className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm text-slate-300 transition-colors">
+              <button onClick={async () => {
+                if (!activeSession?.record_id) return;
+                try {
+                  const result = await getSpecDocument(activeSession.record_id as string);
+                  setSpecPreview(result.spec as string);
+                  toast.success('Spec 已生成');
+                } catch { toast.error('生成失败'); }
+              }} className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm text-slate-300 transition-colors">
                 <Download className="w-4 h-4" />
                 导出 Spec
               </button>
@@ -238,11 +246,28 @@ export default function BrainstormPage() {
               <h3 className="text-xs font-semibold text-slate-400 uppercase mb-2">历史会话</h3>
               {!loaded ? <p className="text-xs text-slate-500">加载中...</p> :
                sessions.length === 0 ? <p className="text-xs text-slate-500">暂无</p> :
-               sessions.map((s) => (
-                 <div key={s.record_id as string} className="py-1 border-b border-slate-700 last:border-0">
+               sessions.slice(0, 5).map((s) => (
+                 <button key={s.record_id as string}
+                   onClick={async () => {
+                     try {
+                       const result = await resumeSession(s.record_id as string);
+                       setActiveSession(result);
+                       setQuestions((result.questions as string[]) || []);
+                       if (result.phase) setPhase(result.phase);
+                       if (result.feature_tree) {
+                         setFeatureTree(result.feature_tree as Record<string, unknown>);
+                         const nodes = (result.feature_tree as Record<string, unknown>).nodes as Record<string, Record<string, unknown>>;
+                         const exploringId = (result.feature_tree as Record<string, unknown>).current_exploring_id as string;
+                         if (exploringId && nodes?.[exploringId]) setActiveNode(nodes[exploringId]);
+                       }
+                       if (result.spec_preview) setSpecPreview(result.spec_preview as string);
+                       if (result.handoff_hints) setHandoffHints(result.handoff_hints as Record<string, unknown>[]);
+                     } catch { toast.error('恢复会话失败'); }
+                   }}
+                   className="w-full text-left py-1.5 border-b border-slate-700 last:border-0 hover:bg-slate-700/50 -mx-1 px-1 rounded transition-colors">
                    <p className="text-xs text-slate-300">{s.project_name as string}</p>
                    <p className="text-[10px] text-slate-500">{s.round_number as number} 轮</p>
-                 </div>
+                 </button>
                ))}
             </div>
           </div>
