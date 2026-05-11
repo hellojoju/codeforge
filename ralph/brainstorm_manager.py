@@ -94,6 +94,30 @@ class BrainstormManager:
         """恢复 session，恢复 phase + active_node"""
         return self.load(record_id)
 
+    def get_conversation_history(self, record: BrainstormRecord) -> list[dict]:
+        """从所有 feature node 收集 conversation_turns，返回前端消息历史"""
+        history = []
+        for node in record.feature_tree.nodes.values():
+            for turn in node.conversation_turns:
+                question = turn.get("question", "")
+                response = turn.get("response", "")
+                if not question and not response:
+                    continue
+                if question:
+                    history.append({
+                        "role": "assistant",
+                        "content": question,
+                        "timestamp": turn.get("timestamp", ""),
+                    })
+                if response:
+                    history.append({
+                        "role": "user",
+                        "content": response,
+                        "timestamp": turn.get("timestamp", ""),
+                    })
+        history.sort(key=lambda m: m["timestamp"])
+        return history
+
     def _get_active_node_name(self, data: dict) -> str:
         """从数据中获取当前活跃节点名称"""
         ft = data.get("feature_tree", {})
@@ -394,6 +418,15 @@ class BrainstormManager:
         root = record.feature_tree.get_node("fn-root")
         source_refs = root.source_refs if root else []
 
+        # 注入对话历史，让 LLM 知道已经问过什么
+        conversation_history = self.get_conversation_history(record)
+        history_text = ""
+        if conversation_history:
+            turns = []
+            for msg in conversation_history:
+                turns.append(f"{'AI' if msg['role'] == 'assistant' else '用户'}: {msg['content']}")
+            history_text = "\n".join(turns[-10:])  # 最近 10 轮对话
+
         prompt = f"""你是资深产品需求分析师。
 项目：{record.project_name}
 当前节点：{root.name if root else '产品定义'}
@@ -402,11 +435,14 @@ class BrainstormManager:
 期望回答形态：{task.expected_answer_shape}
 相关用户原话：{[r.quote for r in source_refs]}
 
+{f"历史对话（已问过和已回答的内容，不要重复提问）：\n{history_text}" if history_text else ""}
+
 请将以上信息改写为 1-2 个具体的追问。要求：
 1. 不要泛泛而问，必须点明当前产品。
 2. 引用用户的原话（如果有）。
 3. 如果用户可能不确定，提供"可以先标记为不确定"的出口。
-4. 只返回 JSON 数组格式的问题列表。"""
+4. 只返回 JSON 数组格式的问题列表。
+5. 绝对不要重复历史对话中已经问过的问题。"""
 
         try:
             result = self._call_llm("product_question", [{"role": "user", "content": prompt}])
@@ -438,12 +474,22 @@ class BrainstormManager:
         if facts:
             self._apply_extracted_facts_to_node(record, root, facts)
 
+        # 保存当前轮次的问答记录
+        question_text = ""
         if task:
             task.status = "answered"
             task.answered_at = datetime.now(UTC).isoformat()
+            question_text = task.question or task.reason
+
+        # 如果 task 没有实际提问文本，尝试从 question_plan 中恢复
+        if not question_text and task_id:
+            for t in record.feature_tree.question_plan:
+                if t.question_id == task_id:
+                    question_text = t.question or t.reason
+                    break
 
         root.conversation_turns.append({
-            "question": task.reason if task else "",
+            "question": question_text or "(系统问题)",
             "response": user_response,
             "timestamp": datetime.now(UTC).isoformat(),
         })

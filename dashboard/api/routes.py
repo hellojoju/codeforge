@@ -1939,6 +1939,7 @@ def create_dashboard_app(
         questions = mgr.explore_product(record)
         if not questions:
             questions = mgr.generate_questions(record, use_llm=True)
+        mgr._save(record)  # 持久化 question_plan 状态
         summary = mgr.get_summary(record)
         from ralph.schema.brainstorm_record import brainstorm_to_dict
         return {
@@ -2042,11 +2043,23 @@ def create_dashboard_app(
         if not record:
             raise HTTPException(status_code=404, detail="Record not found")
         from ralph.schema.brainstorm_record import brainstorm_to_dict
+
+        # 恢复当前待回答问题
+        phase_val = record.current_phase.value if hasattr(record.current_phase, 'value') else str(record.current_phase)
+        if phase_val == "product_def":
+            questions = mgr.explore_product(record)
+        else:
+            questions = mgr.generate_questions(record, use_llm=True)
+        if not questions:
+            questions = ["请补充更多细节"]
+
         return {
             "record_id": record.record_id,
             "phase": record.current_phase,
+            "questions": questions,
             "feature_tree": brainstorm_to_dict(record.feature_tree),
             "active_node": record.feature_tree.current_exploring_id,
+            "conversation_history": mgr.get_conversation_history(record),
         }
 
     @app.post("/api/ralph/brainstorm/{record_id}/advance")

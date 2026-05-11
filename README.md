@@ -226,9 +226,9 @@ DRAFT ──▶ READY ──▶ RUNNING ──▶ NEEDS_REVIEW ──▶ ACCEPTE
 | | `/ralph/events` | 实时事件流 |
 | | `/ralph/approvals` | 审批中心 |
 | | `/ralph/reports` | 研发报告 |
-| **产品** | `/ralph/brainstorm` | 多轮需求共创聊天 |
+| **产品** | `/ralph/brainstorm` | V2 多阶段需求共创（产品定义 → 功能分解 → 关系分析 → 独立审查 → 完成） |
 | | `/ralph/prd` | PRD 文档管理 |
-| | `/ralph/specs` | 规格文档 |
+| | `/ralph/specs` | 规格文档（CMMI 级功能分解 Spec 生成） |
 | | `/ralph/contracts` | 接口合同 |
 | **系统** | `/ralph/graph` | 依赖关系 DAG (graphify) |
 | | `/ralph/memory` | 记忆系统状态 |
@@ -249,6 +249,33 @@ DRAFT ──▶ READY ──▶ RUNNING ──▶ NEEDS_REVIEW ──▶ ACCEPTE
 | `GET /api/agents/*` | 4 | Agent 管理和状态 |
 | `POST /api/execution/*` | 3 | 执行控制（start/stop/status） |
 | `WebSocket /ws/dashboard` | 1 | 实时推送 |
+
+---
+
+## 🧠 Brainstorm V2 — 多阶段需求共创
+
+从"聊完就没了"升级为 **CMMI 级功能分解规格生成器**。整个流程分为 5 个阶段：
+
+| Phase | 名称 | 说明 |
+|-------|------|------|
+| 1 | **产品定义** | 多轮追问明确产品愿景、目标用户、角色、成功标准、MVP 范围 |
+| 2 | **功能分解** | 自动拆分功能节点，逐项追问用户故事、验收标准、成功路径 |
+| 3 | **关系分析** | 分析功能节点间的依赖关系和冲突 |
+| 4 | **独立审查** | 独立 AI 审查器对需求完整性、一致性进行审查 |
+| 5 | **完成** | 生成 Spec 文档和任务交接提示，可直接进入开发阶段 |
+
+### V2 核心组件
+
+| 组件 | 文件 | 作用 |
+|------|------|------|
+| PhaseIndicator | `PhaseIndicator.tsx` | 5 阶段进度指示器 |
+| FeatureTreePanel | `FeatureTreePanel.tsx` | 功能树展开/折叠，节点状态展示 |
+| NodeDetailCard | `NodeDetailCard.tsx` | 节点详情卡片（用户故事、验收标准等） |
+| GranularityBadge | `GranularityBadge.tsx` | 粒度门控检查，显示缺失项 |
+| RelationshipGraph | `RelationshipGraph.tsx` | 依赖关系与冲突可视化 |
+| SpecPreview | `SpecPreview.tsx` | Markdown 规格文档实时预览 |
+| QuestionTracePanel | `QuestionTracePanel.tsx` | 当前追问溯源（节点+字段+原因） |
+| TaskHandoffPanel | `TaskHandoffPanel.tsx` | 任务交接提示，下游开发指引 |
 
 ---
 

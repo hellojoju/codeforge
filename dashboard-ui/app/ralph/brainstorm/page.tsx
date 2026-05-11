@@ -25,6 +25,12 @@ import {
   getTaskHandoffHints, generateTaskHandoffHints,
 } from '@/lib/brainstorm-api';
 
+function formatAssistantContent(questions: string[]): string {
+  if (questions.length === 0) return '';
+  if (questions.length === 1) return questions[0];
+  return questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
+}
+
 export default function BrainstormPage() {
   const router = useRouter();
   const { currentProject } = useRalphStore();
@@ -47,11 +53,20 @@ export default function BrainstormPage() {
   const [specPreview, setSpecPreview] = useState<string>('');
   const [handoffHints, setHandoffHints] = useState<Record<string, unknown>[]>([]);
   const [showTree, setShowTree] = useState(true);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Conversation history
+  interface Message { role: 'user' | 'assistant'; content: string }
+  const [messages, setMessages] = useState<Message[]>([]);
 
   const load = async () => {
     try { setSessions(await listBrainstormSessions()); } catch { toast.error('加载失败'); }
     finally { setLoaded(true); }
   };
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   useEffect(() => {
     if (checkedRef.current) return;
@@ -72,6 +87,13 @@ export default function BrainstormPage() {
       setActiveSession({ record_id: result.record_id });
       setQuestions(result.questions as string[]);
       setInput('');
+      // Refresh session list
+      try { setSessions(await listBrainstormSessions()); } catch { /* ignore */ }
+      // Add to conversation history
+      setMessages([
+        { role: 'user', content: input },
+        { role: 'assistant', content: formatAssistantContent((result.questions as string[]) || []) },
+      ]);
       // V2 state
       if (result.phase) setPhase(result.phase);
       if (result.feature_tree) {
@@ -92,6 +114,12 @@ export default function BrainstormPage() {
       setActiveSession(result);
       setQuestions(result.questions as string[]);
       setInput('');
+      // Append to conversation history
+      setMessages(prev => [
+        ...prev,
+        { role: 'user', content: input },
+        { role: 'assistant', content: formatAssistantContent((result.questions as string[]) || []) },
+      ]);
       // V2 state updates
       if (result.phase) setPhase(result.phase);
       if (result.feature_tree) setFeatureTree(result.feature_tree as Record<string, unknown>);
@@ -164,12 +192,20 @@ export default function BrainstormPage() {
             </div>
           ) : (
             <div className="flex-1 flex flex-col min-h-0">
-              {/* Questions */}
-              <div className="flex-1 overflow-auto space-y-3 p-4 mb-4">
-                {questions.map((q, i) => (
-                  <div key={i} className="flex items-start gap-2 p-3 rounded-lg bg-blue-50 text-sm text-blue-800">
-                    <HelpCircle size={14} className="mt-0.5 flex-shrink-0" />
-                    <span>{q}</span>
+              {/* Messages */}
+              <div className="flex-1 min-h-0 overflow-auto space-y-3 p-4">
+                {messages.map((msg, i) => (
+                  <div key={i} className={`flex items-start gap-2 p-3 rounded-xl text-sm ${
+                    msg.role === 'user'
+                      ? 'bg-slate-50 border border-slate-200 text-slate-800'
+                      : 'bg-blue-50/80 border border-blue-100 text-blue-800'
+                  }`}>
+                    {msg.role === 'user' ? (
+                      <Send size={14} className="mt-0.5 flex-shrink-0 text-slate-400" />
+                    ) : (
+                      <HelpCircle size={14} className="mt-0.5 flex-shrink-0 text-blue-500" />
+                    )}
+                    <span className="leading-relaxed whitespace-pre-wrap">{msg.content}</span>
                   </div>
                 ))}
                 {Boolean(activeSession?.is_complete) && (
@@ -178,6 +214,7 @@ export default function BrainstormPage() {
                     需求完整度达标，可以生成 PRD 了
                   </div>
                 )}
+                <div ref={messagesEndRef} />
               </div>
 
               {/* Input */}
@@ -253,6 +290,15 @@ export default function BrainstormPage() {
                        const result = await resumeSession(s.record_id as string);
                        setActiveSession(result);
                        setQuestions((result.questions as string[]) || []);
+                       // Restore full conversation history
+                       const history = result.conversation_history as Message[] | undefined;
+                       if (history && history.length > 0) {
+                         setMessages(history);
+                       } else {
+                         setMessages([
+                           { role: 'assistant', content: formatAssistantContent((result.questions as string[]) || []) },
+                         ]);
+                       }
                        if (result.phase) setPhase(result.phase);
                        if (result.feature_tree) {
                          setFeatureTree(result.feature_tree as Record<string, unknown>);
