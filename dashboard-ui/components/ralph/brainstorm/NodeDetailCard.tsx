@@ -29,10 +29,10 @@ function Section({ title, items }: { title: string; items: string[] }) {
   if (!items || items.length === 0) return null
   return (
     <div className="mb-3">
-      <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">{title}</h4>
+      <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">{title}</h4>
       <ul className="space-y-1">
         {items.map((item, i) => (
-          <li key={i} className="text-sm text-slate-300 pl-3 border-l-2 border-slate-600">{item}</li>
+          <li key={i} className="text-sm text-slate-700 pl-3 border-l-2 border-slate-200">{item}</li>
         ))}
       </ul>
     </div>
@@ -41,14 +41,14 @@ function Section({ title, items }: { title: string; items: string[] }) {
 
 export default function NodeDetailCard({ node }: NodeDetailCardProps) {
   return (
-    <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-4">
+    <div className="bg-white rounded-lg border border-slate-200 p-4">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold text-white">{node.name}</h3>
+        <h3 className="text-lg font-semibold text-slate-900">{node.name}</h3>
         <span className={`px-2 py-0.5 rounded text-xs font-medium
-          ${node.status === 'confirmed' ? 'bg-emerald-500/20 text-emerald-400' :
-            node.status === 'exploring' ? 'bg-blue-500/20 text-blue-400' :
-            node.status === 'needs_clarification' ? 'bg-amber-500/20 text-amber-400' :
-            'bg-slate-500/20 text-slate-400'}`}>
+          ${node.status === 'confirmed' ? 'bg-emerald-50 text-emerald-600' :
+            node.status === 'exploring' ? 'bg-blue-50 text-blue-600' :
+            node.status === 'needs_clarification' ? 'bg-amber-50 text-amber-600' :
+            'bg-slate-100 text-slate-500'}`}>
           {node.status}
         </span>
       </div>

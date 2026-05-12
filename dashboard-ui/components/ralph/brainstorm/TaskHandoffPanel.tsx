@@ -17,24 +17,24 @@ export default function TaskHandoffPanel({ hints }: TaskHandoffPanelProps) {
   }
 
   return (
-    <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-4">
-      <h3 className="text-sm font-semibold text-slate-300 mb-3">任务交接提示</h3>
+    <div className="bg-white rounded-lg border border-slate-200 p-4">
+      <h3 className="text-sm font-semibold text-slate-700 mb-3">任务交接提示</h3>
       <div className="space-y-3">
         {hints.map(hint => (
-          <div key={hint.hint_id} className="p-3 bg-slate-700/30 rounded border border-slate-600">
-            <h4 className="text-sm font-medium text-slate-200 mb-2">{hint.source_feature_id}</h4>
+          <div key={hint.hint_id} className="p-3 bg-slate-50 rounded border border-slate-200">
+            <h4 className="text-sm font-medium text-slate-800 mb-2">{hint.source_feature_id}</h4>
             {hint.suggested_task_boundaries.length > 0 && (
-              <div className="text-xs text-slate-400 mb-1">
+              <div className="text-xs text-slate-500 mb-1">
                 任务边界：{hint.suggested_task_boundaries.join(', ')}
               </div>
             )}
             {hint.likely_dependencies.length > 0 && (
-              <div className="text-xs text-blue-400 mb-1">
+              <div className="text-xs text-blue-600 mb-1">
                 依赖：{hint.likely_dependencies.join(', ')}
               </div>
             )}
             {hint.risk_notes.length > 0 && (
-              <div className="text-xs text-amber-400">
+              <div className="text-xs text-amber-600">
                 风险：{hint.risk_notes.join('; ')}
               </div>
             )}

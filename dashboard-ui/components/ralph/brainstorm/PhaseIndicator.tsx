@@ -18,7 +18,7 @@ export default function PhaseIndicator({ currentPhase, className = '' }: PhaseIn
   const isComplete = currentPhase === 'complete'
 
   return (
-    <div className={`flex items-center gap-2 px-4 py-3 bg-slate-900/50 border-b border-slate-700 ${className}`}>
+    <div className={`flex items-center gap-2 px-4 py-3 bg-white border-b border-slate-200 ${className}`}>
       {PHASES.map((phase, i) => {
         const isActive = i === currentIndex
         const isDone = i < currentIndex || isComplete
@@ -26,16 +26,16 @@ export default function PhaseIndicator({ currentPhase, className = '' }: PhaseIn
         return (
           <div key={phase.key} className="flex items-center">
             <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all
-              ${isDone ? 'bg-emerald-500/20 text-emerald-400' : ''}
-              ${isActive ? 'bg-blue-500/20 text-blue-400 ring-1 ring-blue-500/50' : ''}
-              ${!isActive && !isDone ? 'text-slate-500' : ''}
+              ${isDone ? 'bg-emerald-50 text-emerald-600' : ''}
+              ${isActive ? 'bg-blue-50 text-blue-600 ring-1 ring-blue-200' : ''}
+              ${!isActive && !isDone ? 'text-slate-400' : ''}
             `}>
               <span>{phase.icon}</span>
               <span>{phase.label}</span>
               {isDone && <CheckCircle className="w-3.5 h-3.5" />}
             </div>
             {i < PHASES.length - 1 && (
-              <ArrowRight className={`w-4 h-4 mx-1 ${isDone ? 'text-emerald-500' : 'text-slate-600'}`} />
+              <ArrowRight className={`w-4 h-4 mx-1 ${isDone ? 'text-emerald-400' : 'text-slate-300'}`} />
             )}
           </div>
         )

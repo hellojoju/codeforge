@@ -19,10 +19,10 @@ interface FeatureTreePanelProps {
 }
 
 const STATUS_ICONS: Record<string, React.ReactNode> = {
-  confirmed: <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />,
-  exploring: <Circle className="w-3.5 h-3.5 text-blue-400 animate-pulse" />,
-  pending: <Circle className="w-3.5 h-3.5 text-slate-500" />,
-  needs_clarification: <AlertCircle className="w-3.5 h-3.5 text-amber-400" />,
+  confirmed: <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />,
+  exploring: <Circle className="w-3.5 h-3.5 text-blue-500 animate-pulse" />,
+  pending: <Circle className="w-3.5 h-3.5 text-slate-400" />,
+  needs_clarification: <AlertCircle className="w-3.5 h-3.5 text-amber-500" />,
 }
 
 export default function FeatureTreePanel({ nodes, rootId, activeNodeId, onNodeClick }: FeatureTreePanelProps) {
@@ -52,7 +52,7 @@ export default function FeatureTreePanel({ nodes, rootId, activeNodeId, onNodeCl
             hasChildren && toggle(nodeId)
           }}
           className={`w-full flex items-center gap-1.5 py-1 px-2 rounded text-sm transition-colors
-            ${isActive ? 'bg-blue-500/20 text-blue-300' : 'text-slate-300 hover:bg-slate-700/50'}
+            ${isActive ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'}
           `}
           style={{ paddingLeft: `${depth * 16 + 8}px` }}
         >
@@ -69,8 +69,8 @@ export default function FeatureTreePanel({ nodes, rootId, activeNodeId, onNodeCl
   }
 
   return (
-    <div className="bg-slate-900/30 border-r border-slate-700 p-2 overflow-y-auto max-h-[600px]">
-      <h3 className="text-sm font-semibold text-slate-400 px-2 py-2">功能树</h3>
+    <div className="bg-white border-r border-slate-200 p-2 overflow-y-auto max-h-[600px]">
+      <h3 className="text-sm font-semibold text-slate-500 px-2 py-2">功能树</h3>
       {renderNode(rootId)}
     </div>
   )
