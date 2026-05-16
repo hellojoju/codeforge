@@ -10,6 +10,7 @@ import os
 import re
 import tempfile
 import threading
+import uuid
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass
@@ -321,6 +322,7 @@ def create_dashboard_app(
         ralph_dir = resolve_ralph_dir(project_dir)
         ralph_repository = RalphRepository(ralph_dir)
     app.state.ralph_repository = ralph_repository
+    app.state.ralph_jobs = {}
 
     # 注入 WorkUnitEngine（如果未提供则从 project_dir 初始化）
     if ralph_engine is None:
@@ -1949,6 +1951,10 @@ def create_dashboard_app(
             "summary": summary,
             "feature_tree": brainstorm_to_dict(record.feature_tree),
             "active_node": record.feature_tree.current_exploring_id,
+            "proactive_analysis": brainstorm_to_dict(record.proactive_analysis) if record.proactive_analysis else None,
+            "deliberation_rounds": [brainstorm_to_dict(r) for r in record.deliberation_rounds],
+            "technical_route": brainstorm_to_dict(record.technical_route) if record.technical_route else None,
+            "tool_discovery_results": [brainstorm_to_dict(r) for r in record.tool_discovery_results],
         }
 
     @app.post("/api/ralph/brainstorm/respond")
@@ -2015,6 +2021,10 @@ def create_dashboard_app(
             "granularity_status": granularity_missing,
             "spec_preview": spec_preview,
             "handoff_hints": handoff_hints,
+            "proactive_analysis": brainstorm_to_dict(updated.proactive_analysis) if updated.proactive_analysis else None,
+            "deliberation_rounds": [brainstorm_to_dict(r) for r in updated.deliberation_rounds],
+            "technical_route": brainstorm_to_dict(updated.technical_route) if updated.technical_route else None,
+            "tool_discovery_results": [brainstorm_to_dict(r) for r in updated.tool_discovery_results],
         }
 
     # --- Ralph API: Brainstorm V2 端点 ---
@@ -2060,6 +2070,10 @@ def create_dashboard_app(
             "feature_tree": brainstorm_to_dict(record.feature_tree),
             "active_node": record.feature_tree.current_exploring_id,
             "conversation_history": mgr.get_conversation_history(record),
+            "proactive_analysis": brainstorm_to_dict(record.proactive_analysis) if record.proactive_analysis else None,
+            "deliberation_rounds": [brainstorm_to_dict(r) for r in record.deliberation_rounds],
+            "technical_route": brainstorm_to_dict(record.technical_route) if record.technical_route else None,
+            "tool_discovery_results": [brainstorm_to_dict(r) for r in record.tool_discovery_results],
         }
 
     @app.post("/api/ralph/brainstorm/{record_id}/advance")
@@ -2152,6 +2166,320 @@ def create_dashboard_app(
         analyzer = BrainstormAnalyzer(mgr._config)
         hints = analyzer.generate_task_handoff_hints(record)
         return [brainstorm_to_dict(h) for h in hints]
+
+    # --- Ralph API: Brainstorm V3 端点 ---
+
+    def _find_record_by_technical_route(route_or_record_id: str):
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(route_or_record_id)
+        if record:
+            return mgr, record
+        for session in mgr.list_sessions():
+            candidate = mgr.load(session.get("record_id", ""))
+            if candidate and candidate.technical_route and candidate.technical_route.route_id == route_or_record_id:
+                return mgr, candidate
+        raise HTTPException(status_code=404, detail="Technical route not found")
+
+    def _record_ralph_job(kind: str, status: str, payload: dict[str, Any] | None = None) -> str:
+        job_id = f"job-{uuid.uuid4().hex[:10]}"
+        app.state.ralph_jobs[job_id] = {
+            "job_id": job_id,
+            "kind": kind,
+            "status": status,
+            "created_at": datetime.now(UTC).isoformat(),
+            "payload": payload or {},
+        }
+        return job_id
+
+    @app.post("/api/ralph/brainstorm/{record_id}/proactive-analysis")
+    async def ralph_generate_proactive_analysis(record_id: str) -> dict:
+        """生成主动分析草案。"""
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        mgr._run_proactive_analysis(record)
+        mgr._save(record)
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "proactive_analysis": brainstorm_to_dict(record.proactive_analysis),
+            "current_phase": record.current_phase,
+        }
+
+    @app.post("/api/ralph/brainstorm/{record_id}/proactive/confirm")
+    async def ralph_proactive_confirm(record_id: str, body: dict[str, Any]) -> dict:
+        """用户确认/修改主动分析条目。"""
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        analysis = record.proactive_analysis
+        if not analysis:
+            raise HTTPException(status_code=400, detail="No proactive analysis available")
+
+        item_id = body.get("item_id")
+        status = body.get("status", "pending")
+        revision = body.get("revision", "")
+
+        if not item_id:
+            raise HTTPException(status_code=422, detail="item_id required")
+        try:
+            mgr.update_proactive_analysis_item(record, item_id, status, revision)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        # 确认完成后尝试推进 phase
+        mgr.advance_phase(record)
+
+        mgr._save(record)
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "proactive_analysis": brainstorm_to_dict(analysis),
+            "current_phase": record.current_phase,
+        }
+
+    @app.post("/api/ralph/brainstorm/{record_id}/proactive-analysis/confirm")
+    async def ralph_proactive_analysis_confirm(record_id: str, body: dict[str, Any]) -> dict:
+        """方案路径别名：用户确认、修改或拒绝主动分析条目。"""
+        return await ralph_proactive_confirm(record_id, body)
+
+    @app.post("/api/ralph/brainstorm/{record_id}/deliberation")
+    async def ralph_run_deliberation(record_id: str) -> dict:
+        """方案路径别名：触发四维结构化功能审查。"""
+        return await ralph_start_deliberation(record_id)
+
+    @app.post("/api/ralph/brainstorm/{record_id}/deliberation/start")
+    async def ralph_start_deliberation(record_id: str) -> dict:
+        """触发四维结构化功能审查。"""
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        from ralph.schema.brainstorm_record import BrainstormPhase
+        if record.current_phase == BrainstormPhase.FEATURE_DECOMPOSE:
+            mgr.advance_phase(record)
+        if record.current_phase != BrainstormPhase.DELIBERATION_REVIEW:
+            raise HTTPException(
+                status_code=409,
+                detail="Deliberation can only run after feature decomposition is confirmed",
+            )
+
+        rnd = mgr.trigger_deliberation_review(record)
+        mgr._save(record)
+        job_id = _record_ralph_job("deliberation", "succeeded", {"record_id": record_id, "round_id": rnd.round_id})
+
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "job_id": job_id,
+            "job_status": "succeeded",
+            "round": {
+                "round_id": rnd.round_id,
+                "finding_count": len(rnd.findings),
+                "findings": [brainstorm_to_dict(f) for f in rnd.findings],
+                "pm_summary": rnd.pm_summary,
+            },
+            "current_phase": record.current_phase,
+        }
+
+    @app.post("/api/ralph/brainstorm/{record_id}/deliberation/decision")
+    async def ralph_deliberation_decision(record_id: str, body: dict[str, Any]) -> dict:
+        """PM 对审查发现做裁决。"""
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        finding_id = body.get("finding_id")
+        decision = body.get("decision", "pending")
+        reason = body.get("reason", "")
+
+        if not finding_id:
+            raise HTTPException(status_code=422, detail="finding_id required")
+
+        from ralph.deliberation_service import DeliberationReviewService
+        service = DeliberationReviewService(mgr._config)
+        try:
+            service.make_decision(record, finding_id, decision, reason)
+            service.apply_pm_decisions(record)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        advanced = mgr.advance_phase(record)
+
+        mgr._save(record)
+        return {
+            "success": True,
+            "finding_id": finding_id,
+            "decision": decision,
+            "advanced": advanced,
+            "current_phase": record.current_phase,
+        }
+
+    @app.post("/api/ralph/brainstorm/{record_id}/deliberation/decide")
+    async def ralph_deliberation_decide(record_id: str, body: dict[str, Any]) -> dict:
+        """方案路径别名：PM 或用户处理审查建议。"""
+        return await ralph_deliberation_decision(record_id, body)
+
+    @app.post("/api/ralph/specs/{spec_id}/technical-route")
+    async def ralph_generate_technical_route_from_spec(spec_id: str) -> dict:
+        """基于冻结 Spec 生成技术路线草案。
+
+        当前 Spec 与 BrainstormRecord 仍共用 record id；后续 Spec 独立持久化后，
+        这里可以替换为 spec_id → brainstorm_record_id 的显式映射。
+        """
+        return await ralph_generate_technical_route(spec_id)
+
+    @app.post("/api/ralph/brainstorm/{record_id}/technical-route/generate")
+    async def ralph_generate_technical_route(record_id: str) -> dict:
+        """生成技术路线草案。"""
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        from ralph.schema.brainstorm_record import BrainstormPhase
+        if record.current_phase not in (BrainstormPhase.REQUIREMENTS_READY, BrainstormPhase.COMPLETE):
+            raise HTTPException(
+                status_code=409,
+                detail="Technical route requires frozen requirements/spec first",
+            )
+
+        route = mgr.generate_technical_route(record)
+        from ralph.schema.brainstorm_record import BrainstormPhase
+        record.current_phase = BrainstormPhase.TECHNICAL_ROUTE_DRAFT
+        mgr._save(record)
+
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "technical_route": brainstorm_to_dict(route),
+            "current_phase": record.current_phase,
+        }
+
+    @app.post("/api/ralph/technical-routes/{route_id}/confirm")
+    async def ralph_confirm_technical_route_by_id(route_id: str, body: dict[str, Any]) -> dict:
+        """方案路径：用户确认或要求修改技术路线。"""
+        mgr, record = _find_record_by_technical_route(route_id)
+        status = body.get("status", "pending")
+        feedback = body.get("feedback", "")
+        try:
+            mgr.confirm_technical_route(record, status, feedback)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if status == "accepted":
+            mgr.advance_phase(record)
+
+        mgr._save(record)
+
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "technical_route": brainstorm_to_dict(record.technical_route),
+            "current_phase": record.current_phase,
+        }
+
+    @app.post("/api/ralph/brainstorm/{record_id}/technical-route/confirm")
+    async def ralph_confirm_technical_route(record_id: str, body: dict[str, Any]) -> dict:
+        """用户确认技术路线。"""
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        status = body.get("status", "pending")
+        feedback = body.get("feedback", "")
+        try:
+            mgr.confirm_technical_route(record, status, feedback)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if status == "accepted":
+            mgr.advance_phase(record)
+
+        mgr._save(record)
+
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "technical_route": brainstorm_to_dict(record.technical_route),
+            "current_phase": record.current_phase,
+        }
+
+    @app.post("/api/ralph/technical-routes/{route_id}/tool-discovery")
+    async def ralph_start_tool_discovery_by_route_id(route_id: str) -> dict:
+        """方案路径：根据技术路线触发工具发现。"""
+        mgr, record = _find_record_by_technical_route(route_id)
+        if not record.technical_route or record.technical_route.status != "accepted":
+            raise HTTPException(status_code=400, detail="Technical route must be accepted first")
+        from ralph.schema.brainstorm_record import BrainstormPhase
+        if record.current_phase != BrainstormPhase.TOOL_DISCOVERY:
+            raise HTTPException(status_code=409, detail="Tool discovery is not active for this route")
+
+        results = mgr.trigger_tool_discovery(record)
+        mgr.advance_phase(record)
+        mgr._save(record)
+        job_id = _record_ralph_job("tool_discovery", "succeeded", {"route_id": route_id})
+
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "job_id": job_id,
+            "job_status": "succeeded",
+            "discovery_results": [brainstorm_to_dict(r) for r in results],
+            "current_phase": record.current_phase,
+        }
+
+    @app.post("/api/ralph/brainstorm/{record_id}/tool-discovery/start")
+    async def ralph_start_tool_discovery(record_id: str) -> dict:
+        """基于技术路线触发工具发现。"""
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        if not record.technical_route or record.technical_route.status != "accepted":
+            raise HTTPException(status_code=400, detail="Technical route must be accepted first")
+        from ralph.schema.brainstorm_record import BrainstormPhase
+        if record.current_phase != BrainstormPhase.TOOL_DISCOVERY:
+            raise HTTPException(status_code=409, detail="Tool discovery is not active for this record")
+
+        results = mgr.trigger_tool_discovery(record)
+        mgr.advance_phase(record)
+        mgr._save(record)
+        job_id = _record_ralph_job("tool_discovery", "succeeded", {"record_id": record_id})
+
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "job_id": job_id,
+            "job_status": "succeeded",
+            "discovery_results": [brainstorm_to_dict(r) for r in results],
+            "current_phase": record.current_phase,
+        }
+
+    @app.get("/api/ralph/brainstorm/{record_id}/tool-discovery")
+    async def ralph_get_tool_discovery(record_id: str) -> list[dict]:
+        """获取工具发现结果。"""
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return [brainstorm_to_dict(r) for r in record.tool_discovery_results]
+
+    @app.get("/api/ralph/technical-routes/{route_id}/tool-discovery")
+    async def ralph_get_tool_discovery_by_route_id(route_id: str) -> list[dict]:
+        """方案路径：查看工具候选与评估结果。"""
+        _, record = _find_record_by_technical_route(route_id)
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return [brainstorm_to_dict(r) for r in record.tool_discovery_results]
+
+    @app.get("/api/ralph/jobs/{job_id}")
+    async def ralph_get_job(job_id: str) -> dict:
+        """查看 Ralph 长任务状态。"""
+        job = app.state.ralph_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return job
 
     # --- Ralph API: PRD 端点 ---
 

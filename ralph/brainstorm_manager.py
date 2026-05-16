@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from ralph.schema.brainstorm_record import (
-    BrainstormPhase, BrainstormRecord, ConfirmedFact, FeatureNode, FeatureTree,
-    OpenAssumption, QuestionTask, UserPath, _now_iso, brainstorm_to_dict, dict_to_brainstorm,
+    BrainstormPhase, BrainstormRecord, ConfirmedFact, DeliberationRound, FeatureNode, FeatureTree,
+    OpenAssumption, QuestionTask, TechnicalRoute, ToolDiscoveryResult, UserPath, _now_iso,
+    brainstorm_to_dict, dict_to_brainstorm,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,7 +34,7 @@ class BrainstormManager:
     # ---- 会话生命周期 ---------------------------------------------------
 
     def start_session(self, project_name: str, user_message: str) -> BrainstormRecord:
-        """V2: 创建 session，初始化 product 根节点，进入 Phase 1"""
+        """V3: 创建 session，初始化 product 根节点，进入 PROACTIVE_ANALYSIS Phase"""
         record_id = f"bs-{_now_iso().replace(':', '-')}"
 
         # 创建 product 根节点
@@ -56,10 +58,13 @@ class BrainstormManager:
             record_id=record_id,
             project_name=project_name,
             user_message=user_message,
-            current_phase=BrainstormPhase.PRODUCT_DEF,
+            current_phase=BrainstormPhase.PROACTIVE_ANALYSIS,
             feature_tree=feature_tree,
             round_number=1,
         )
+
+        # V3: 触发主动分析
+        self._run_proactive_analysis(record)
 
         self._save(record)
         return record
@@ -131,6 +136,12 @@ class BrainstormManager:
         ft = data.get("feature_tree", {})
         nodes = ft.get("nodes", {})
         return sum(1 for n in nodes.values() if n.get("status") == "confirmed")
+
+    def _run_proactive_analysis(self, record: BrainstormRecord) -> None:
+        """V3: 调用 ProactiveAnalysisService 生成假设草案。"""
+        from ralph.proactive_service import ProactiveAnalysisService
+        service = ProactiveAnalysisService(self._config)
+        service.analyze(record)
 
     # ---- 问题生成 -------------------------------------------------------
 
@@ -318,6 +329,7 @@ class BrainstormManager:
     ) -> str | None:
         """统一 LLM 调用入口：resolve provider → proxy_request → extract content。"""
         if self._config is None:
+            logger.warning("BrainstormManager: _config is None, LLM 调用跳过")
             return None
 
         try:
@@ -326,6 +338,7 @@ class BrainstormManager:
             provider = {"provider_id": "", "model": "", "source": "none"}
 
         if not provider.get("provider_id"):
+            logger.warning("BrainstormManager: provider_id 为空, task_type=%s, provider=%s", task_type, provider)
             return None
 
         result = self._config.proxy_request(
@@ -341,7 +354,12 @@ class BrainstormManager:
 
         if result.get("ok"):
             try:
-                return result["data"]["choices"][0]["message"]["content"]
+                message = result["data"]["choices"][0]["message"]
+                content = message.get("content", "") or ""
+                # DeepSeek reasoning 模型把内容放在 reasoning_content 里
+                if not content.strip():
+                    content = message.get("reasoning_content", "") or ""
+                return content if content.strip() else None
             except (KeyError, IndexError, TypeError):
                 logger.warning("BrainstormManager: LLM 响应结构异常")
 
@@ -512,6 +530,36 @@ class BrainstormManager:
             ):
                 return False
         return True
+
+    def _check_proactive_analysis_confirmed(self, record: BrainstormRecord) -> bool:
+        """检查主动分析阶段是否已确认核心条目。"""
+        analysis = record.proactive_analysis
+        # 如果没有生成分析条目（LLM 未配置或失败），跳过此阶段
+        if not analysis or not analysis.items:
+            return True
+        # 如果核心类别不存在，也跳过（不要求必须有）
+        present_categories = {item.category for item in analysis.items}
+        required = {"product_type", "target_user", "core_scenario"}
+        missing_required = required - present_categories
+        if missing_required:
+            # 缺失的类别自动视为通过
+            pass
+        confirmed_categories = {
+            item.category
+            for item in analysis.items
+            if item.status in ("accepted", "modified")
+        }
+        # 只检查已存在的核心类别是否被确认
+        present_required = required & present_categories
+        return present_required.issubset(confirmed_categories)
+
+    def _check_deliberation_resolved(self, record: BrainstormRecord) -> bool:
+        """检查所有 high severity finding 是否被 accept/reject/defer。"""
+        if not record.deliberation_rounds:
+            return False
+        latest = record.deliberation_rounds[-1]
+        high_findings = [f for f in latest.findings if f.severity == "high"]
+        return all(f.pm_decision in ("accept", "reject", "defer") for f in high_findings)
 
     def _apply_extracted_facts_to_node(
         self, record: BrainstormRecord, node: FeatureNode, facts: dict,
@@ -765,7 +813,12 @@ class BrainstormManager:
         current = record.current_phase
         now = _now_iso()
 
-        if current == BrainstormPhase.PRODUCT_DEF:
+        if current == BrainstormPhase.PROACTIVE_ANALYSIS:
+            if not self._check_proactive_analysis_confirmed(record):
+                return False
+            record.current_phase = BrainstormPhase.PRODUCT_DEF
+
+        elif current == BrainstormPhase.PRODUCT_DEF:
             root = record.feature_tree.get_node("fn-root")
             if not root or not self._check_product_complete(root):
                 return False
@@ -776,6 +829,13 @@ class BrainstormManager:
 
         elif current == BrainstormPhase.FEATURE_DECOMPOSE:
             if not record.feature_tree.all_confirmed():
+                return False
+            record.current_phase = BrainstormPhase.DELIBERATION_REVIEW
+
+        elif current == BrainstormPhase.DELIBERATION_REVIEW:
+            if not record.deliberation_rounds:
+                return False
+            if not self._check_deliberation_resolved(record):
                 return False
             record.current_phase = BrainstormPhase.RELATIONSHIP
 
@@ -788,8 +848,7 @@ class BrainstormManager:
             if not record.review_result:
                 return False
             if record.review_result.passed:
-                record.current_phase = BrainstormPhase.COMPLETE
-                record.completed_at = now
+                record.current_phase = BrainstormPhase.REQUIREMENTS_READY
             else:
                 record.current_phase = BrainstormPhase.CLARIFICATION
 
@@ -798,6 +857,24 @@ class BrainstormManager:
             if not clarifying or all(n.status == "confirmed" for n in clarifying):
                 record.current_phase = BrainstormPhase.INDEPENDENT_REVIEW
                 record.review_result = None  # 重新审查
+
+        elif current == BrainstormPhase.REQUIREMENTS_READY:
+            record.current_phase = BrainstormPhase.COMPLETE
+            record.completed_at = now
+
+        elif current == BrainstormPhase.TECHNICAL_ROUTE_DRAFT:
+            if not record.technical_route:
+                return False
+            if record.technical_route.status != "accepted":
+                return False
+            record.current_phase = BrainstormPhase.TOOL_DISCOVERY
+
+        elif current == BrainstormPhase.TOOL_DISCOVERY:
+            record.current_phase = BrainstormPhase.EXECUTION_PLAN_READY
+
+        elif current == BrainstormPhase.EXECUTION_PLAN_READY:
+            record.current_phase = BrainstormPhase.COMPLETE
+            record.completed_at = now
 
         record.phase_history.append({"phase": record.current_phase, "at": now})
         self._save(record)
@@ -860,20 +937,29 @@ class BrainstormManager:
         user_response: str,
         extracted_facts: list[dict] | None = None,
     ) -> BrainstormRecord:
-        """V2: 按 phase 路由处理用户回复"""
+        """V2/V3: 按 phase 路由处理用户回复"""
         phase = record.current_phase
 
-        if phase == BrainstormPhase.PRODUCT_DEF:
+        if phase == BrainstormPhase.PROACTIVE_ANALYSIS:
+            self._process_proactive_response(record, user_response)
+
+        elif phase == BrainstormPhase.PRODUCT_DEF:
             self._process_product_response(record, user_response)
 
         elif phase == BrainstormPhase.FEATURE_DECOMPOSE:
             self._process_decompose_response(record, user_response, extracted_facts)
+
+        elif phase == BrainstormPhase.DELIBERATION_REVIEW:
+            self._process_deliberation_response(record, user_response)
 
         elif phase == BrainstormPhase.RELATIONSHIP:
             self._process_relationship_response(record, user_response)
 
         elif phase == BrainstormPhase.CLARIFICATION:
             self._process_clarification_response(record, user_response)
+
+        elif phase == BrainstormPhase.REQUIREMENTS_READY:
+            self._process_requirements_confirm(record, user_response)
 
         # 尝试推进 phase
         self.advance_phase(record)
@@ -940,6 +1026,57 @@ class BrainstormManager:
         if all(n.status == "confirmed" for n in clarifying) or not clarifying:
             record.current_phase = BrainstormPhase.INDEPENDENT_REVIEW
             record.review_result = None  # 清空旧结果
+
+    # ---- V3: 新 phase 处理方法 -------------------------------------------
+
+    def _process_proactive_response(self, record: BrainstormRecord, user_response: str) -> None:
+        """处理 PROACTIVE_ANALYSIS 阶段用户回复。
+
+        用户的自由文本回复视为对主动分析问题的回答：
+        - 自动确认所有 question 类型条目，将用户回答存入 user_revision
+        - 如果用户回答涉及产品类型/目标用户/核心场景，也一并确认
+        - 这样用户只需在输入框回答一次，phase 就能正常推进
+        """
+        analysis = record.proactive_analysis
+        if not analysis:
+            return
+
+        for item in analysis.items:
+            if item.category == "question" and item.status == "pending":
+                # question 类型：用户回答即确认
+                item.status = "accepted"
+                item.user_revision = user_response
+
+            # 非 question 类型：用户参与即视为默认认可方向
+            elif item.category in ("product_type", "target_user", "core_scenario") and item.status == "pending":
+                item.status = "accepted"
+                item.user_revision = user_response
+
+        # 写入对话历史
+        root = record.feature_tree.get_node("fn-root")
+        if root:
+            root.conversation_turns.append({
+                "question": "请确认或修改以下分析方向",
+                "response": user_response,
+                "timestamp": _now_iso(),
+            })
+
+    def _process_deliberation_response(self, record: BrainstormRecord, user_response: str) -> None:
+        """处理 DELIBERATION_REVIEW 阶段用户回复。"""
+        if not record.deliberation_rounds:
+            return
+        latest = record.deliberation_rounds[-1]
+        latest.pm_summary += f"\n用户反馈: {user_response}"
+
+    def _process_requirements_confirm(self, record: BrainstormRecord, user_response: str) -> None:
+        """处理 REQUIREMENTS_READY 阶段用户确认。"""
+        root = record.feature_tree.get_node("fn-root")
+        if root:
+            root.conversation_turns.append({
+                "question": "请确认最终需求规格",
+                "response": user_response,
+                "timestamp": _now_iso(),
+            })
 
     def is_complete_v2(self, record: BrainstormRecord) -> bool:
         """V2: current_phase == COMPLETE"""
@@ -1021,6 +1158,100 @@ class BrainstormManager:
                 if not val:
                     gaps.append(f"节点 '{node.name}' 缺少 {key}")
         return gaps
+
+    # ---- V3: 公开方法 -------------------------------------------------------
+
+    def trigger_deliberation_review(self, record: BrainstormRecord) -> DeliberationRound:
+        """触发四维结构化功能审查。"""
+        from ralph.deliberation_service import DeliberationReviewService
+        service = DeliberationReviewService(self._config)
+        return service.run_review(record)
+
+    def update_proactive_analysis_item(
+        self,
+        record: BrainstormRecord,
+        item_id: str,
+        status: str,
+        revision: str = "",
+    ) -> None:
+        """确认、修改或拒绝主动分析条目，并将采纳内容写入正式需求上下文。"""
+        if status not in {"pending", "accepted", "rejected", "modified"}:
+            raise ValueError(f"Invalid proactive analysis status: {status}")
+        if not record.proactive_analysis:
+            raise ValueError("No proactive analysis available")
+
+        item = next((i for i in record.proactive_analysis.items if i.item_id == item_id), None)
+        if item is None:
+            raise ValueError(f"Proactive analysis item not found: {item_id}")
+
+        item.status = status
+        item.user_revision = revision
+
+        if status in {"accepted", "modified"}:
+            content = revision.strip() if status == "modified" and revision.strip() else item.content
+            topic_map = {
+                "product_type": "产品类型",
+                "target_user": "目标用户",
+                "core_scenario": "核心场景",
+                "module": "核心功能",
+                "tech_direction": "技术方向",
+                "risk": "风险",
+            }
+            topic = topic_map.get(item.category, item.category)
+            if not any(f.topic == topic and f.fact == content for f in record.confirmed_facts):
+                record.confirmed_facts.append(ConfirmedFact(
+                    topic=topic,
+                    fact=content,
+                    source_quote=revision or item.content,
+                ))
+
+            root = record.feature_tree.get_node("fn-root")
+            if root:
+                if item.category == "target_user" and content not in root.target_users:
+                    root.target_users.append(content)
+                elif item.category == "core_scenario" and content not in root.success_criteria:
+                    root.success_criteria.append(content)
+                elif item.category == "module" and content not in root.mvp_scope:
+                    root.mvp_scope.append(content)
+                elif item.category == "risk" and content not in root.assumptions:
+                    root.assumptions.append(content)
+                elif item.category == "product_type" and content not in root.business_rules:
+                    root.business_rules.append(content)
+
+        if self._check_proactive_analysis_confirmed(record):
+            record.proactive_analysis.confirmed_at = _now_iso()
+
+    def generate_technical_route(self, record: BrainstormRecord) -> TechnicalRoute:
+        """基于已确认需求生成技术路线草案。"""
+        from ralph.technical_route_service import TechnicalRouteService
+        service = TechnicalRouteService(self._config)
+        route = service.generate_route(record)
+        record.technical_route = route
+        return route
+
+    def confirm_technical_route(self, record: BrainstormRecord, status: str, feedback: str = "") -> None:
+        """用户确认技术路线。"""
+        if record.technical_route:
+            if status not in {"pending", "accepted", "revision_requested"}:
+                raise ValueError(f"Invalid technical route status: {status}")
+            if status == "revision_requested":
+                record.technical_route_history.append(replace(record.technical_route))
+            record.technical_route.status = status
+            record.technical_route.user_feedback = feedback
+            if status == "accepted":
+                record.technical_route.confirmed_at = _now_iso()
+
+    def trigger_tool_discovery(self, record: BrainstormRecord) -> list[ToolDiscoveryResult]:
+        """基于技术路线触发工具发现。"""
+        if not record.technical_route:
+            return []
+        if record.technical_route.status != "accepted":
+            return []
+        from ralph.tool_discovery import ToolDiscoveryService
+        service = ToolDiscoveryService(self._config)
+        results = service.discover(record.technical_route.tool_needs)
+        record.tool_discovery_results = results
+        return results
 
     # ---- 文档生成 -----------------------------------------------------------
 
