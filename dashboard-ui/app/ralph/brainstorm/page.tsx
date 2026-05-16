@@ -192,21 +192,6 @@ export default function BrainstormPage() {
     finally { setLoading(false); }
   };
 
-  const handleProactiveDecision = async (
-    itemId: string,
-    status: 'accepted' | 'rejected' | 'modified',
-  ) => {
-    if (!activeSession?.record_id) return;
-    try {
-      const result = await confirmProactiveAnalysisItem(activeSession.record_id as string, itemId, status);
-      setProactiveAnalysis((result.proactive_analysis as Record<string, unknown> | null) || null);
-      if (result.current_phase) setPhase(result.current_phase as string);
-      toast.success('已更新假设状态');
-    } catch {
-      toast.error('更新假设失败');
-    }
-  };
-
   const handleTriggerDeliberation = async () => {
     if (!activeSession?.record_id) return;
     setLoading(true);
@@ -220,26 +205,6 @@ export default function BrainstormPage() {
       toast.error('结构化审查失败');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleFindingDecision = async (
-    findingId: string,
-    decision: 'accept' | 'reject' | 'defer',
-  ) => {
-    if (!activeSession?.record_id) return;
-    try {
-      const result = await decideDeliberationFinding(activeSession.record_id as string, findingId, decision);
-      setDeliberationRounds(prev => prev.map((round) => ({
-        ...round,
-        findings: ((round.findings as Record<string, unknown>[] | undefined) || []).map((finding) => (
-          finding.finding_id === findingId ? { ...finding, pm_decision: decision } : finding
-        )),
-      })));
-      if (result.current_phase) setPhase(result.current_phase as string);
-      toast.success('已更新审查裁决');
-    } catch {
-      toast.error('更新裁决失败');
     }
   };
 

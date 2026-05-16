@@ -1,10 +1,16 @@
 import { CheckCircle, ArrowRight } from 'lucide-react'
 
 const PHASES = [
+  { key: 'proactive_analysis', label: '主动分析', icon: '💡' },
   { key: 'product_def', label: '产品定义', icon: '🎯' },
   { key: 'feature_decompose', label: '功能分解', icon: '🔍' },
+  { key: 'deliberation_review', label: '结构化审查', icon: '🧭' },
   { key: 'relationship', label: '关系分析', icon: '🔗' },
   { key: 'independent_review', label: '独立审查', icon: '✅' },
+  { key: 'requirements_ready', label: '需求就绪', icon: '📄' },
+  { key: 'technical_route_draft', label: '技术路线', icon: '🗺️' },
+  { key: 'tool_discovery', label: '工具发现', icon: '🔍' },
+  { key: 'execution_plan_ready', label: '执行计划', icon: '📋' },
   { key: 'complete', label: '完成', icon: '🎉' },
 ]
 
