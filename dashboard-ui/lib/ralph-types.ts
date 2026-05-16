@@ -254,11 +254,19 @@ export interface Tab {
 // === Run Status ===
 
 export interface RunStatus {
-  total_work_units: number;
-  status_counts: Record<string, number>;
-  success_rate_percent: number;
-  unresolved_blockers: number;
-  timestamp: string;
+  total_work_units?: number;
+  status_counts?: Record<string, number>;
+  success_rate_percent?: number;
+  unresolved_blockers?: number;
+  timestamp?: string;
+  total?: number;
+  running?: number;
+  needs_review?: number;
+  blocked?: number;
+  accepted?: number;
+  failed?: number;
+  latest_event?: unknown;
+  next_action?: string | null;
 }
 
 // === API Request/Response Types ===
@@ -361,3 +369,124 @@ export interface ReviewResultWithDimensions extends ReviewResult {
   dimension_results: DimensionResult[];
   overall_confidence: string;
 }
+
+// === Brainstorm V3 Types ===
+
+export type BrainstormPhase =
+  | 'product_def'
+  | 'feature_decompose'
+  | 'deliberation_review'
+  | 'relationship'
+  | 'independent_review'
+  | 'clarification'
+  | 'complete'
+  | 'proactive_analysis'
+  | 'technical_route_draft'
+  | 'tool_discovery'
+  | 'requirements_ready'
+  | 'execution_plan_ready';
+
+export type ProactiveItemStatus = 'pending' | 'accepted' | 'rejected' | 'modified';
+export type DeliberationDecision = 'pending' | 'accept' | 'reject' | 'defer';
+export type DeliberationSeverity = 'low' | 'medium' | 'high';
+export type TechnicalRouteStatus = 'pending' | 'accepted' | 'revision_requested';
+export type ToolRecommendation = 'adopt' | 'compare' | 'avoid';
+export type SecurityRisk = 'low' | 'medium' | 'high' | 'unknown';
+export type IntegrationCost = 'low' | 'medium' | 'high';
+export type ToolSource = 'github' | 'web' | 'docs';
+
+export interface ProactiveAnalysisItem {
+  item_id: string;
+  category: string;
+  content: string;
+  confidence: number;
+  status: ProactiveItemStatus;
+  user_revision: string;
+}
+
+export interface ProactiveAnalysis {
+  analysis_id: string;
+  items: ProactiveAnalysisItem[];
+  summary: string;
+  created_at: string;
+  confirmed_at: string;
+}
+
+export interface DeliberationFinding {
+  finding_id: string;
+  dimension: string;
+  affected_feature_ids: string[];
+  finding: string;
+  severity: DeliberationSeverity;
+  suggested_change: string;
+  evidence: string;
+  pm_decision: DeliberationDecision;
+  pm_reason: string;
+}
+
+export interface DeliberationRound {
+  round_id: string;
+  findings: DeliberationFinding[];
+  pm_summary: string;
+  created_at: string;
+  completed_at: string;
+}
+
+export interface TechnicalRoute {
+  route_id: string;
+  architecture_summary: string;
+  frontend_stack: string[];
+  backend_stack: string[];
+  data_storage: string[];
+  integrations: string[];
+  non_functional_requirements: string[];
+  key_risks: string[];
+  tool_needs: string[];
+  status: TechnicalRouteStatus;
+  user_feedback: string;
+  created_at: string;
+  confirmed_at: string;
+}
+
+export interface ToolCandidate {
+  candidate_id: string;
+  name: string;
+  source: ToolSource;
+  url: string;
+  description: string;
+  license: string;
+  stars: number | null;
+  last_updated: string;
+  package_name: string;
+  evidence_urls: string[];
+  evidence_snapshot: string;
+}
+
+export interface ToolEvaluation {
+  candidate_id: string;
+  functional_fit: number;
+  maintenance_health: number;
+  license_fit: number;
+  stack_compatibility: number;
+  security_risk: SecurityRisk;
+  integration_cost: IntegrationCost;
+  summary: string;
+  recommendation: ToolRecommendation;
+}
+
+export interface ToolDiscoveryResult {
+  discovery_id: string;
+  tool_need: string;
+  queries: string[];
+  candidates: ToolCandidate[];
+  evaluations: ToolEvaluation[];
+  selected_candidate_ids: string[];
+  created_at: string;
+}
+
+export const DIMENSION_DISPLAY_NAMES: Record<string, string> = {
+  user_journey_analyst: '用户行为路径',
+  feature_completeness_reviewer: '功能完整性',
+  industry_benchmark_analyst: '行业对标',
+  scenario_combiner: '场景组合',
+};
