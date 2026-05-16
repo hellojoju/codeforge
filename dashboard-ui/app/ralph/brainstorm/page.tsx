@@ -96,8 +96,45 @@ export default function BrainstormPage() {
   const [messages, setMessages] = useState<Message[]>([]);
 
   const load = async () => {
-    try { setSessions(await listBrainstormSessions()); } catch { toast.error('加载失败'); }
+    try {
+      const sessionList = await listBrainstormSessions();
+      setSessions(sessionList);
+      // 自动恢复最近一次会话
+      if (sessionList.length > 0 && !activeSession) {
+        const latest = sessionList[0];
+        await resumeAndSetSession(latest.record_id as string);
+      }
+    } catch { toast.error('加载失败'); }
     finally { setLoaded(true); }
+  };
+
+  const resumeAndSetSession = async (recordId: string) => {
+    try {
+      const result = await resumeSession(recordId);
+      setActiveSession(result);
+      // Restore conversation history
+      const history = result.conversation_history as Message[] | undefined;
+      if (history && history.length > 0) {
+        setMessages(history);
+      } else {
+        setMessages([
+          { role: 'assistant', content: formatAssistantContent((result.questions as string[]) || []) },
+        ]);
+      }
+      if (result.phase) setPhase(result.phase as string);
+      setCurrentQuestion((result.current_question as Record<string, unknown> | null) || null);
+      if (result.feature_tree) {
+        setFeatureTree(result.feature_tree as Record<string, unknown>);
+        const nodes = (result.feature_tree as Record<string, unknown>).nodes as Record<string, BrainstormFeatureNode>;
+        const exploringId = (result.feature_tree as Record<string, unknown>).current_exploring_id as string;
+        if (exploringId && nodes?.[exploringId]) setActiveNode(nodes[exploringId]);
+      }
+      if (result.spec_preview) setSpecPreview(result.spec_preview as string);
+      if (result.handoff_hints) setHandoffHints(result.handoff_hints as HandoffHint[]);
+      syncV3State(result);
+    } catch {
+      toast.error('恢复会话失败');
+    }
   };
 
   const syncV3State = (result: Record<string, unknown>) => {
@@ -521,30 +558,8 @@ export default function BrainstormPage() {
                sessions.slice(0, 5).map((s) => (
                  <button key={s.record_id as string}
                    onClick={async () => {
-                     try {
-                       const result = await resumeSession(s.record_id as string);
-                       setActiveSession(result);
-                       // Restore full conversation history
-                       const history = result.conversation_history as Message[] | undefined;
-                       if (history && history.length > 0) {
-                         setMessages(history);
-                       } else {
-                         setMessages([
-                           { role: 'assistant', content: formatAssistantContent((result.questions as string[]) || []) },
-                         ]);
-                       }
-                       if (result.phase) setPhase(result.phase as string);
-                       setCurrentQuestion((result.current_question as Record<string, unknown> | null) || null);
-                       if (result.feature_tree) {
-                         setFeatureTree(result.feature_tree as Record<string, unknown>);
-                         const nodes = (result.feature_tree as Record<string, unknown>).nodes as Record<string, BrainstormFeatureNode>;
-                         const exploringId = (result.feature_tree as Record<string, unknown>).current_exploring_id as string;
-                         if (exploringId && nodes?.[exploringId]) setActiveNode(nodes[exploringId]);
-                       }
-                       if (result.spec_preview) setSpecPreview(result.spec_preview as string);
-                       if (result.handoff_hints) setHandoffHints(result.handoff_hints as HandoffHint[]);
-                       syncV3State(result);
-                     } catch { toast.error('恢复会话失败'); }
+                     await resumeAndSetSession(s.record_id as string);
+                     try { setSessions(await listBrainstormSessions()); } catch { /* ignore */ }
                    }}
                    className="w-full text-left py-1.5 border-b border-slate-100 last:border-0 hover:bg-slate-50 -mx-1 px-1 rounded transition-colors">
                    <p className="text-xs text-slate-700">{s.project_name as string}</p>
