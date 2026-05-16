@@ -60,7 +60,7 @@ export default function ProactiveAnalysisPanel({ analysis, onConfirm }: Proactiv
     <div className="rounded border border-slate-200 p-3">
       {/* Header */}
       <div className="mb-2 flex items-center justify-between gap-2">
-        <h3 className="text-sm font-semibold text-slate-700">主动分析假设</h3>
+        <h3 className="text-sm font-semibold text-slate-700">主动分析</h3>
         <span className="text-[10px] text-slate-400">{progress}% 已确认</span>
       </div>
 
@@ -80,21 +80,39 @@ export default function ProactiveAnalysisPanel({ analysis, onConfirm }: Proactiv
         <p className="mb-3 text-xs text-slate-500 leading-relaxed">{analysis.summary}</p>
       )}
 
-      {/* Items */}
+      {/* Non-question items */}
       <div className="space-y-2">
-        {analysis.items.map(item => (
-          <ProactiveItemRow
-            key={item.item_id}
-            item={item}
-            isEditing={editingId === item.item_id}
-            editText={editText}
-            onEditTextChange={setEditText}
-            onSaveEdit={handleSaveEdit}
-            onCancelEdit={() => { setEditingId(null); setEditText('') }}
-            onStatus={handleStatus}
-          />
-        ))}
+        {analysis.items
+          .filter(item => item.category !== 'question')
+          .map(item => (
+            <ProactiveItemRow
+              key={item.item_id}
+              item={item}
+              isEditing={editingId === item.item_id}
+              editText={editText}
+              onEditTextChange={setEditText}
+              onSaveEdit={handleSaveEdit}
+              onCancelEdit={() => { setEditingId(null); setEditText('') }}
+              onStatus={handleStatus}
+            />
+          ))}
       </div>
+
+      {/* Question items — user answers these */}
+      {analysis.items.filter(item => item.category === 'question').length > 0 && (
+        <div className="mt-4 space-y-2">
+          <h4 className="text-[11px] font-semibold text-slate-600 uppercase tracking-wide">需要确认的问题</h4>
+          {analysis.items
+            .filter(item => item.category === 'question')
+            .map(item => (
+              <QuestionItemRow
+                key={item.item_id}
+                item={item}
+                onSubmit={(itemId, answer) => onConfirm(itemId, 'accepted', answer)}
+              />
+            ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -107,6 +125,48 @@ interface ProactiveItemRowProps {
   onSaveEdit: () => void
   onCancelEdit: () => void
   onStatus: (itemId: string, status: ProactiveItemStatus) => void
+}
+
+interface QuestionItemRowProps {
+  item: ProactiveAnalysisItem
+  onSubmit: (itemId: string, answer: string) => void
+}
+
+function QuestionItemRow({ item, onSubmit }: QuestionItemRowProps) {
+  const [answer, setAnswer] = useState('')
+  const submitted = item.status !== 'pending'
+
+  if (submitted) {
+    return (
+      <div className="rounded border border-slate-200 bg-slate-50 p-2 text-xs">
+        <p className="font-medium text-slate-700 mb-1">{item.content}</p>
+        <p className="text-blue-600 leading-relaxed">你的回答：{item.user_revision || '（未填写）'}</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded border border-amber-200 bg-amber-50/50 p-2 text-xs">
+      <p className="font-medium text-slate-700 mb-2">{item.content}</p>
+      <textarea
+        className="w-full rounded border border-slate-300 p-1.5 text-xs resize-none bg-white"
+        rows={2}
+        placeholder="输入你的回答..."
+        value={answer}
+        onChange={e => setAnswer(e.target.value)}
+      />
+      <button
+        className="mt-1.5 rounded bg-blue-600 px-2 py-1 text-[10px] text-white hover:bg-blue-500 disabled:opacity-50"
+        disabled={!answer.trim()}
+        onClick={() => {
+          if (answer.trim()) {
+            onSubmit(item.item_id, answer.trim())
+            setAnswer('')
+          }
+        }}
+      >提交回答</button>
+    </div>
+  )
 }
 
 function ProactiveItemRow({ item, isEditing, editText, onEditTextChange, onSaveEdit, onCancelEdit, onStatus }: ProactiveItemRowProps) {

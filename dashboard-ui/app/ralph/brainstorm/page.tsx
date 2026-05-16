@@ -320,20 +320,43 @@ export default function BrainstormPage() {
 
               {/* Messages */}
               <div className="flex-1 min-h-0 overflow-auto space-y-3 p-4 bg-slate-50/30">
-                {messages.map((msg, i) => (
-                  <div key={i} className={`flex items-start gap-2 p-3 rounded-xl text-sm ${
-                    msg.role === 'user'
-                      ? 'bg-white border border-slate-200 text-slate-800'
-                      : 'bg-blue-50/50 border border-blue-100 text-blue-800'
-                  }`}>
-                    {msg.role === 'user' ? (
-                      <Send size={14} className="mt-0.5 flex-shrink-0 text-slate-400" />
-                    ) : (
-                      <HelpCircle size={14} className="mt-0.5 flex-shrink-0 text-blue-500" />
-                    )}
-                    <span className="leading-relaxed whitespace-pre-wrap">{msg.content}</span>
-                  </div>
-                ))}
+                {messages.map((msg, i) => {
+                  // 在 PROACTIVE_ANALYSIS phase 时，跳过 assistant 的旧格式回复（用 ProactiveAnalysisPanel 替代）
+                  if (phase === 'proactive_analysis' && msg.role === 'assistant') return null;
+                  return (
+                    <div key={i} className={`flex items-start gap-2 p-3 rounded-xl text-sm ${
+                      msg.role === 'user'
+                        ? 'bg-white border border-slate-200 text-slate-800'
+                        : 'bg-blue-50/50 border border-blue-100 text-blue-800'
+                    }`}>
+                      {msg.role === 'user' ? (
+                        <Send size={14} className="mt-0.5 flex-shrink-0 text-slate-400" />
+                      ) : (
+                        <HelpCircle size={14} className="mt-0.5 flex-shrink-0 text-blue-500" />
+                      )}
+                      <span className="leading-relaxed whitespace-pre-wrap">{msg.content}</span>
+                    </div>
+                  );
+                })}
+
+                {/* PROACTIVE_ANALYSIS phase: 用 ProactiveAnalysisPanel 替代 assistant 回复 */}
+                {phase === 'proactive_analysis' && proactiveAnalysis && (
+                  <ProactiveAnalysisPanel
+                    analysis={proactiveAnalysis as unknown as import('@/lib/ralph-types').ProactiveAnalysis}
+                    onConfirm={async (itemId, status, revision) => {
+                      if (!activeSession?.record_id) return;
+                      try {
+                        const result = await confirmProactiveAnalysisItem(activeSession.record_id as string, itemId, status as 'accepted' | 'rejected' | 'modified', revision);
+                        setProactiveAnalysis((result.proactive_analysis as Record<string, unknown> | null) || null);
+                        if (result.current_phase) setPhase(result.current_phase as string);
+                        toast.success('已更新假设状态');
+                      } catch {
+                        toast.error('更新假设失败');
+                      }
+                    }}
+                  />
+                )}
+
                 {Boolean(activeSession?.is_complete) && (
                   <div className="flex items-center gap-2 p-3 rounded-lg bg-emerald-50 text-emerald-700 text-sm">
                     <CheckCircle size={14} />
@@ -364,102 +387,91 @@ export default function BrainstormPage() {
             {activeNode && <NodeDetailCard node={activeNode} />}
             {granularityMissing.length > 0 && <GranularityBadge missingItems={granularityMissing} />}
 
-            {proactiveAnalysis && (
-              <ProactiveAnalysisPanel
-                analysis={proactiveAnalysis as unknown as import('@/lib/ralph-types').ProactiveAnalysis}
-                onConfirm={async (itemId, status, revision) => {
+            {/* 多维审查 — 仅在 deliberation_review phase 显示 */}
+            {(phase === 'deliberation_review' || deliberationRounds.length > 0) && (
+              <DeliberationFindingsPanel
+                rounds={deliberationRounds as unknown as import('@/lib/ralph-types').DeliberationRound[]}
+                showTrigger={phase === 'deliberation_review' && deliberationRounds.length === 0}
+                onTrigger={handleTriggerDeliberation}
+                onDecide={async (findingId, decision) => {
                   if (!activeSession?.record_id) return;
                   try {
-                    const result = await confirmProactiveAnalysisItem(activeSession.record_id as string, itemId, status as 'accepted' | 'rejected' | 'modified', revision);
-                    setProactiveAnalysis((result.proactive_analysis as Record<string, unknown> | null) || null);
+                    const result = await decideDeliberationFinding(activeSession.record_id as string, findingId, decision as 'accept' | 'reject' | 'defer');
+                    setDeliberationRounds(prev => prev.map((round) => ({
+                      ...round,
+                      findings: ((round.findings as Record<string, unknown>[] | undefined) || []).map((finding) => (
+                        (finding as Record<string, unknown>).finding_id === findingId ? { ...finding, pm_decision: decision } : finding
+                      )),
+                    })));
                     if (result.current_phase) setPhase(result.current_phase as string);
-                    toast.success('已更新假设状态');
+                    toast.success('已更新审查裁决');
                   } catch {
-                    toast.error('更新假设失败');
+                    toast.error('更新裁决失败');
                   }
                 }}
+                loading={loading}
               />
             )}
 
-            <DeliberationFindingsPanel
-              rounds={deliberationRounds as unknown as import('@/lib/ralph-types').DeliberationRound[]}
-              showTrigger={deliberationRounds.length === 0}
-              onTrigger={handleTriggerDeliberation}
-              onDecide={async (findingId, decision) => {
-                if (!activeSession?.record_id) return;
-                try {
-                  const result = await decideDeliberationFinding(activeSession.record_id as string, findingId, decision as 'accept' | 'reject' | 'defer');
-                  setDeliberationRounds(prev => prev.map((round) => ({
-                    ...round,
-                    findings: ((round.findings as Record<string, unknown>[] | undefined) || []).map((finding) => (
-                      (finding as Record<string, unknown>).finding_id === findingId ? { ...finding, pm_decision: decision } : finding
-                    )),
-                  })));
-                  if (result.current_phase) setPhase(result.current_phase as string);
-                  toast.success('已更新审查裁决');
-                } catch {
-                  toast.error('更新裁决失败');
-                }
-              }}
-              loading={loading}
-            />
-
-            <div className="rounded border border-slate-200 p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <h3 className="text-sm font-semibold text-slate-700">开发前准备</h3>
-                <button onClick={handleGenerateTechnicalRoute} disabled={loading}
-                  className="rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">
-                  生成路线
-                </button>
-              </div>
-              {!technicalRoute ? (
-                <p className="text-xs text-slate-400">需求冻结后生成技术路线</p>
-              ) : (
-                <div className="space-y-2">
-                  <div className="rounded bg-slate-50 p-2">
-                    <div className="mb-1 flex items-center justify-between gap-2">
-                      <span className="text-[10px] text-slate-400">{technicalRoute.status as string}</span>
-                      <span className="text-[10px] text-slate-400">{technicalRoute.route_id as string}</span>
-                    </div>
-                    <p className="text-xs leading-relaxed text-slate-700">{technicalRoute.architecture_summary as string}</p>
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {((technicalRoute.tool_needs as string[] | undefined) || []).map((need) => (
-                        <span key={need} className="rounded bg-white px-1.5 py-0.5 text-[10px] text-slate-500">{need}</span>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="flex gap-1">
-                    <button onClick={() => handleConfirmTechnicalRoute('accepted')}
-                      className="rounded border border-emerald-200 px-2 py-1 text-[11px] text-emerald-700 hover:bg-emerald-50">
-                      采用
-                    </button>
-                    <button onClick={() => handleConfirmTechnicalRoute('revision_requested')}
-                      className="rounded border border-orange-200 px-2 py-1 text-[11px] text-orange-700 hover:bg-orange-50">
-                      修订
-                    </button>
-                    <button onClick={handleTriggerToolDiscovery}
-                      className="rounded border border-blue-200 px-2 py-1 text-[11px] text-blue-700 hover:bg-blue-50">
-                      工具发现
-                    </button>
-                  </div>
-                  {toolDiscoveryResults.length > 0 && (
-                    <div className="space-y-2">
-                      {toolDiscoveryResults.map((result) => (
-                        <div key={result.discovery_id as string} className="rounded bg-slate-50 p-2">
-                          <p className="text-[10px] text-slate-400">{result.tool_need as string}</p>
-                          {((result.candidates as Record<string, unknown>[] | undefined) || []).slice(0, 3).map((candidate) => (
-                            <div key={candidate.candidate_id as string} className="mt-1 text-xs text-slate-700">
-                              {candidate.name as string}
-                              <span className="ml-1 text-[10px] text-slate-400">{candidate.source as string}</span>
-                            </div>
-                          ))}
-                        </div>
-                      ))}
-                    </div>
-                  )}
+            {/* 开发前准备 — 仅在 technical_route_draft 及之后 phase 显示 */}
+            {(phase === 'technical_route_draft' || phase === 'tool_discovery' || phase === 'execution_plan_ready' || technicalRoute) && (
+              <div className="rounded border border-slate-200 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-slate-700">开发前准备</h3>
+                  <button onClick={handleGenerateTechnicalRoute} disabled={loading}
+                    className="rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+                    生成路线
+                  </button>
                 </div>
-              )}
-            </div>
+                {!technicalRoute ? (
+                  <p className="text-xs text-slate-400">需求冻结后生成技术路线</p>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="rounded bg-slate-50 p-2">
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <span className="text-[10px] text-slate-400">{technicalRoute.status as string}</span>
+                        <span className="text-[10px] text-slate-400">{technicalRoute.route_id as string}</span>
+                      </div>
+                      <p className="text-xs leading-relaxed text-slate-700">{technicalRoute.architecture_summary as string}</p>
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {((technicalRoute.tool_needs as string[] | undefined) || []).map((need) => (
+                          <span key={need} className="rounded bg-white px-1.5 py-0.5 text-[10px] text-slate-500">{need}</span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="flex gap-1">
+                      <button onClick={() => handleConfirmTechnicalRoute('accepted')}
+                        className="rounded border border-emerald-200 px-2 py-1 text-[11px] text-emerald-700 hover:bg-emerald-50">
+                        采用
+                      </button>
+                      <button onClick={() => handleConfirmTechnicalRoute('revision_requested')}
+                        className="rounded border border-orange-200 px-2 py-1 text-[11px] text-orange-700 hover:bg-orange-50">
+                        修订
+                      </button>
+                      <button onClick={handleTriggerToolDiscovery}
+                        className="rounded border border-blue-200 px-2 py-1 text-[11px] text-blue-700 hover:bg-blue-50">
+                        工具发现
+                      </button>
+                    </div>
+                    {toolDiscoveryResults.length > 0 && (
+                      <div className="space-y-2">
+                        {toolDiscoveryResults.map((result) => (
+                          <div key={result.discovery_id as string} className="rounded bg-slate-50 p-2">
+                            <p className="text-[10px] text-slate-400">{result.tool_need as string}</p>
+                            {((result.candidates as Record<string, unknown>[] | undefined) || []).slice(0, 3).map((candidate) => (
+                              <div key={candidate.candidate_id as string} className="mt-1 text-xs text-slate-700">
+                                {candidate.name as string}
+                                <span className="ml-1 text-[10px] text-slate-400">{candidate.source as string}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             {phase === 'relationship' && featureTree && (
               <RelationshipGraph edges={[]} conflicts={[]} />
