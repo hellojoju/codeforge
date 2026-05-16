@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -9,12 +10,16 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
+# 设置 PROJECT_DIR 环境变量，让 routes.py 使用正确的项目路径
+# 注意：指向 git repo 根目录，因为 .ralph 目录位于此处
+PROJECT_DIR = project_root
+os.environ["PROJECT_DIR"] = str(PROJECT_DIR)
+
 from core.project_manager import ProjectManager  # noqa: E402
 from dashboard.api.routes import create_dashboard_app  # noqa: E402
 from dashboard.event_bus import EventBus  # noqa: E402
 from dashboard.state_repository import ProjectStateRepository  # noqa: E402
 
-PROJECT_DIR = project_root / "project"
 STATE_DIR = PROJECT_DIR / "data" / "dashboard"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 
