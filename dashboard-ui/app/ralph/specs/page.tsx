@@ -1,36 +1,64 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { FileText, RefreshCw } from 'lucide-react';
+import { FileText, RefreshCw, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
+interface BrainstormRecord {
+  record_id: string;
+  project_name: string;
+  phase: string;
+  technical_route?: {
+    route_id: string;
+    architecture_summary: string;
+    tool_needs: string[];
+    status: string;
+  } | null;
+}
+
 export default function SpecsPage() {
-  const [specs, setSpecs] = useState<Record<string, unknown>[]>([]);
+  const [records, setRecords] = useState<BrainstormRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/ralph/specs').then(r => r.json()).then((data) => {
-      setSpecs(Array.isArray(data) ? data : []);
+    fetch('/api/ralph/brainstorm').then(r => r.json()).then((data) => {
+      setRecords(Array.isArray(data) ? data : []);
     }).catch(() => toast.error('加载失败')).finally(() => setLoading(false));
   }, []);
 
+  const withRoute = records.filter(r => r.technical_route);
+
   return (
     <div className="max-w-4xl mx-auto px-6 py-5">
-      <h1 className="text-lg font-semibold text-slate-900 mb-5">规格文档</h1>
+      <h1 className="text-lg font-semibold text-slate-900 mb-5">规格与技术路线</h1>
       {loading ? <p className="text-sm text-slate-400"><RefreshCw size={12} className="animate-spin inline mr-1" />加载中...</p> :
-       specs.length === 0 ? <p className="text-sm text-slate-400">暂无规格文档</p> :
+       withRoute.length === 0 ? <p className="text-sm text-slate-400">暂无技术路线</p> :
        <div className="space-y-2">
-        {specs.map((s) => (
-          <div key={s.capability as string} className="rounded-lg border border-slate-200 bg-white p-4">
+        {withRoute.map((r) => (
+          <a
+            key={r.record_id}
+            href={`/ralph/specs/${r.record_id}`}
+            className="block rounded-lg border border-slate-200 bg-white p-4 hover:bg-slate-50 transition-colors"
+          >
             <div className="flex items-center justify-between">
-              <div>
-                <span className="text-sm font-semibold text-slate-900">{s.title as string}</span>
-                <code className="text-[11px] text-slate-400 ml-2">{s.capability as string}</code>
+              <div className="flex items-center gap-2">
+                <FileText size={16} className="text-slate-400" />
+                <span className="text-sm font-semibold text-slate-900">{r.project_name}</span>
               </div>
-              <span className={cn('text-[10px] px-1.5 py-0.5 rounded', s.status === 'current' ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500')}>{s.status as string}</span>
+              <div className="flex items-center gap-2">
+                <span className={cn(
+                  'text-[10px] px-1.5 py-0.5 rounded',
+                  r.technical_route?.status === 'accepted' ? 'bg-emerald-50 text-emerald-600' :
+                  r.technical_route?.status === 'revision_requested' ? 'bg-rose-50 text-rose-600' :
+                  'bg-amber-50 text-amber-600'
+                )}>{r.technical_route?.status ?? 'pending'}</span>
+                <ChevronRight size={14} className="text-slate-400" />
+              </div>
             </div>
-            <p className="text-xs text-slate-500 mt-1">v{s.version as string} · {s.interfaces as number} 接口</p>
-          </div>
+            {r.technical_route?.architecture_summary && (
+              <p className="text-xs text-slate-500 mt-1 line-clamp-2">{r.technical_route.architecture_summary}</p>
+            )}
+          </a>
         ))}
        </div>}
     </div>
