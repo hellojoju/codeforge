@@ -9,7 +9,6 @@ import { useRouter } from 'next/navigation';
 import { MessageCircle, Send, RefreshCw, CheckCircle, HelpCircle, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { listBrainstormSessions, startBrainstorm, brainstormRespond } from '@/lib/ralph-api';
-import { formatDate } from '@/lib/ralph-utils';
 import { toast } from 'sonner';
 import { useRalphStore } from '@/lib/ralph-store';
 import PhaseIndicator from '@/components/ralph/brainstorm/PhaseIndicator';
@@ -20,15 +19,49 @@ import QuestionTracePanel from '@/components/ralph/brainstorm/QuestionTracePanel
 import RelationshipGraph from '@/components/ralph/brainstorm/RelationshipGraph';
 import SpecPreview from '@/components/ralph/brainstorm/SpecPreview';
 import TaskHandoffPanel from '@/components/ralph/brainstorm/TaskHandoffPanel';
+import ProactiveAnalysisPanel from '@/components/ralph/brainstorm/ProactiveAnalysisPanel';
+import DeliberationFindingsPanel from '@/components/ralph/brainstorm/DeliberationFindingsPanel';
 import {
-  resumeSession, getFeatureTree, getSpecDocument, getQuestionPlan,
-  getTaskHandoffHints, generateTaskHandoffHints,
+  resumeSession, getSpecDocument, confirmProactiveAnalysisItem,
+  triggerDeliberation, decideDeliberationFinding, generateTechnicalRoute,
+  confirmTechnicalRoute, triggerToolDiscovery,
 } from '@/lib/brainstorm-api';
 
 function formatAssistantContent(questions: string[]): string {
   if (questions.length === 0) return '';
   if (questions.length === 1) return questions[0];
   return questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
+}
+
+interface FeatureTreeNode {
+  node_id: string
+  name: string
+  level: string
+  status: string
+  children: string[]
+  [key: string]: unknown
+}
+
+interface BrainstormFeatureNode extends FeatureTreeNode {
+  user_stories: string[]
+  acceptance_criteria: string[]
+  success_path: string[]
+  failure_path: string[]
+  edge_cases: string[]
+  data_requirements: string[]
+  dependencies: string[]
+  assumptions: string[]
+  business_rules: string[]
+  permission_rules: string[]
+}
+
+interface HandoffHint {
+  hint_id: string
+  source_feature_id: string
+  suggested_task_boundaries: string[]
+  likely_dependencies: string[]
+  required_recon_questions: string[]
+  risk_notes: string[]
 }
 
 export default function BrainstormPage() {
@@ -39,7 +72,6 @@ export default function BrainstormPage() {
   // V1 state
   const [sessions, setSessions] = useState<Record<string, unknown>[]>([]);
   const [activeSession, setActiveSession] = useState<Record<string, unknown> | null>(null);
-  const [questions, setQuestions] = useState<string[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -47,11 +79,15 @@ export default function BrainstormPage() {
   // V2 state
   const [phase, setPhase] = useState<string>('product_def');
   const [featureTree, setFeatureTree] = useState<Record<string, unknown> | null>(null);
-  const [activeNode, setActiveNode] = useState<Record<string, unknown> | null>(null);
+  const [activeNode, setActiveNode] = useState<BrainstormFeatureNode | null>(null);
   const [currentQuestion, setCurrentQuestion] = useState<Record<string, unknown> | null>(null);
   const [granularityMissing, setGranularityMissing] = useState<string[]>([]);
   const [specPreview, setSpecPreview] = useState<string>('');
-  const [handoffHints, setHandoffHints] = useState<Record<string, unknown>[]>([]);
+  const [handoffHints, setHandoffHints] = useState<HandoffHint[]>([]);
+  const [proactiveAnalysis, setProactiveAnalysis] = useState<Record<string, unknown> | null>(null);
+  const [deliberationRounds, setDeliberationRounds] = useState<Record<string, unknown>[]>([]);
+  const [technicalRoute, setTechnicalRoute] = useState<Record<string, unknown> | null>(null);
+  const [toolDiscoveryResults, setToolDiscoveryResults] = useState<Record<string, unknown>[]>([]);
   const [showTree, setShowTree] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -62,6 +98,21 @@ export default function BrainstormPage() {
   const load = async () => {
     try { setSessions(await listBrainstormSessions()); } catch { toast.error('加载失败'); }
     finally { setLoaded(true); }
+  };
+
+  const syncV3State = (result: Record<string, unknown>) => {
+    if ('proactive_analysis' in result) {
+      setProactiveAnalysis((result.proactive_analysis as Record<string, unknown> | null) || null);
+    }
+    if ('deliberation_rounds' in result) {
+      setDeliberationRounds((result.deliberation_rounds as Record<string, unknown>[]) || []);
+    }
+    if ('technical_route' in result) {
+      setTechnicalRoute((result.technical_route as Record<string, unknown> | null) || null);
+    }
+    if ('tool_discovery_results' in result) {
+      setToolDiscoveryResults((result.tool_discovery_results as Record<string, unknown>[]) || []);
+    }
   };
 
   useEffect(() => {
@@ -76,16 +127,16 @@ export default function BrainstormPage() {
       router.push('/ralph/projects');
       return;
     }
-    void load();
-  }, [currentProject]);
+    const timer = window.setTimeout(() => { void load(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [currentProject, router]);
 
   const handleStart = async () => {
     if (!input || !currentProject) return;
     setLoading(true);
     try {
       const result = await startBrainstorm(currentProject.name, input);
-      setActiveSession({ record_id: result.record_id });
-      setQuestions(result.questions as string[]);
+      setActiveSession(result);
       setInput('');
       // Refresh session list
       try { setSessions(await listBrainstormSessions()); } catch { /* ignore */ }
@@ -95,13 +146,15 @@ export default function BrainstormPage() {
         { role: 'assistant', content: formatAssistantContent((result.questions as string[]) || []) },
       ]);
       // V2 state
-      if (result.phase) setPhase(result.phase);
+      if (result.phase) setPhase(result.phase as string);
+      setCurrentQuestion(null);
       if (result.feature_tree) {
         setFeatureTree(result.feature_tree as Record<string, unknown>);
         const exploringId = (result.feature_tree as Record<string, unknown>).current_exploring_id as string;
-        const nodes = (result.feature_tree as Record<string, unknown>).nodes as Record<string, Record<string, unknown>>;
+        const nodes = (result.feature_tree as Record<string, unknown>).nodes as Record<string, BrainstormFeatureNode>;
         if (exploringId && nodes?.[exploringId]) setActiveNode(nodes[exploringId]);
       }
+      syncV3State(result);
     } catch { toast.error('启动失败'); }
     finally { setLoading(false); }
   };
@@ -112,7 +165,6 @@ export default function BrainstormPage() {
     try {
       const result = await brainstormRespond(activeSession.record_id as string, input);
       setActiveSession(result);
-      setQuestions(result.questions as string[]);
       setInput('');
       // Append to conversation history
       setMessages(prev => [
@@ -121,15 +173,17 @@ export default function BrainstormPage() {
         { role: 'assistant', content: formatAssistantContent((result.questions as string[]) || []) },
       ]);
       // V2 state updates
-      if (result.phase) setPhase(result.phase);
+      if (result.phase) setPhase(result.phase as string);
+      setCurrentQuestion((result.current_question as Record<string, unknown> | null) || null);
       if (result.feature_tree) setFeatureTree(result.feature_tree as Record<string, unknown>);
       if (result.active_node) {
-        const nodes = (result.feature_tree as Record<string, unknown>)?.nodes as Record<string, Record<string, unknown>>;
+        const nodes = (result.feature_tree as Record<string, unknown>)?.nodes as Record<string, BrainstormFeatureNode>;
         if (nodes?.[result.active_node as string]) setActiveNode(nodes[result.active_node as string]);
       }
       if (result.granularity_status) setGranularityMissing(result.granularity_status as string[]);
       if (result.spec_preview) setSpecPreview(result.spec_preview as string);
-      if (result.handoff_hints) setHandoffHints(result.handoff_hints as Record<string, unknown>[]);
+      if (result.handoff_hints) setHandoffHints(result.handoff_hints as HandoffHint[]);
+      syncV3State(result);
       if (result.is_complete) {
         toast.success('需求共创完成！');
         await load();
@@ -138,7 +192,100 @@ export default function BrainstormPage() {
     finally { setLoading(false); }
   };
 
-  const summary = activeSession?.summary as Record<string, unknown> | undefined;
+  const handleProactiveDecision = async (
+    itemId: string,
+    status: 'accepted' | 'rejected' | 'modified',
+  ) => {
+    if (!activeSession?.record_id) return;
+    try {
+      const result = await confirmProactiveAnalysisItem(activeSession.record_id as string, itemId, status);
+      setProactiveAnalysis((result.proactive_analysis as Record<string, unknown> | null) || null);
+      if (result.current_phase) setPhase(result.current_phase as string);
+      toast.success('已更新假设状态');
+    } catch {
+      toast.error('更新假设失败');
+    }
+  };
+
+  const handleTriggerDeliberation = async () => {
+    if (!activeSession?.record_id) return;
+    setLoading(true);
+    try {
+      const result = await triggerDeliberation(activeSession.record_id as string);
+      const round = result.round as Record<string, unknown> | undefined;
+      if (round) setDeliberationRounds(prev => [...prev, round]);
+      if (result.current_phase) setPhase(result.current_phase as string);
+      toast.success('结构化审查已完成');
+    } catch {
+      toast.error('结构化审查失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleFindingDecision = async (
+    findingId: string,
+    decision: 'accept' | 'reject' | 'defer',
+  ) => {
+    if (!activeSession?.record_id) return;
+    try {
+      const result = await decideDeliberationFinding(activeSession.record_id as string, findingId, decision);
+      setDeliberationRounds(prev => prev.map((round) => ({
+        ...round,
+        findings: ((round.findings as Record<string, unknown>[] | undefined) || []).map((finding) => (
+          finding.finding_id === findingId ? { ...finding, pm_decision: decision } : finding
+        )),
+      })));
+      if (result.current_phase) setPhase(result.current_phase as string);
+      toast.success('已更新审查裁决');
+    } catch {
+      toast.error('更新裁决失败');
+    }
+  };
+
+  const handleGenerateTechnicalRoute = async () => {
+    if (!activeSession?.record_id) return;
+    setLoading(true);
+    try {
+      const result = await generateTechnicalRoute(activeSession.record_id as string);
+      setTechnicalRoute((result.technical_route as Record<string, unknown> | null) || null);
+      if (result.current_phase) setPhase(result.current_phase as string);
+      toast.success('技术路线已生成');
+    } catch {
+      toast.error('请先完成并冻结需求规格');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleConfirmTechnicalRoute = async (status: 'accepted' | 'revision_requested') => {
+    const routeId = technicalRoute?.route_id as string | undefined;
+    if (!routeId) return;
+    try {
+      const result = await confirmTechnicalRoute(routeId, status);
+      setTechnicalRoute((result.technical_route as Record<string, unknown> | null) || null);
+      if (result.current_phase) setPhase(result.current_phase as string);
+      toast.success(status === 'accepted' ? '技术路线已确认' : '已标记需要修订');
+    } catch {
+      toast.error('更新技术路线失败');
+    }
+  };
+
+  const handleTriggerToolDiscovery = async () => {
+    const routeId = technicalRoute?.route_id as string | undefined;
+    if (!routeId) return;
+    setLoading(true);
+    try {
+      const result = await triggerToolDiscovery(routeId);
+      setToolDiscoveryResults((result.discovery_results as Record<string, unknown>[]) || []);
+      if (result.current_phase) setPhase(result.current_phase as string);
+      toast.success('工具发现已完成');
+    } catch {
+      toast.error('请先确认技术路线');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -150,11 +297,11 @@ export default function BrainstormPage() {
         {featureTree && showTree && (
           <div className="w-64 shrink-0">
             <FeatureTreePanel
-              nodes={(featureTree.nodes as Record<string, Record<string, unknown>>) || {}}
+              nodes={(featureTree.nodes as Record<string, FeatureTreeNode>) || {}}
               rootId={(featureTree.root_id as string) || 'fn-root'}
               activeNodeId={(featureTree.current_exploring_id as string) || ''}
               onNodeClick={(id) => {
-                const nodes = featureTree.nodes as Record<string, Record<string, unknown>>;
+                const nodes = featureTree.nodes as Record<string, BrainstormFeatureNode>;
                 if (nodes?.[id]) setActiveNode(nodes[id]);
               }}
             />
@@ -249,14 +396,111 @@ export default function BrainstormPage() {
         {/* Right Panel */}
         {activeSession && (
           <div className="w-80 shrink-0 border-l border-slate-200 overflow-y-auto p-4 space-y-4 bg-white">
-            {activeNode && <NodeDetailCard node={activeNode as Record<string, unknown>} />}
+            {activeNode && <NodeDetailCard node={activeNode} />}
             {granularityMissing.length > 0 && <GranularityBadge missingItems={granularityMissing} />}
+
+            {proactiveAnalysis && (
+              <ProactiveAnalysisPanel
+                analysis={proactiveAnalysis as unknown as import('@/lib/ralph-types').ProactiveAnalysis}
+                onConfirm={async (itemId, status, revision) => {
+                  if (!activeSession?.record_id) return;
+                  try {
+                    const result = await confirmProactiveAnalysisItem(activeSession.record_id as string, itemId, status as 'accepted' | 'rejected' | 'modified', revision);
+                    setProactiveAnalysis((result.proactive_analysis as Record<string, unknown> | null) || null);
+                    if (result.current_phase) setPhase(result.current_phase as string);
+                    toast.success('已更新假设状态');
+                  } catch {
+                    toast.error('更新假设失败');
+                  }
+                }}
+              />
+            )}
+
+            <DeliberationFindingsPanel
+              rounds={deliberationRounds as unknown as import('@/lib/ralph-types').DeliberationRound[]}
+              showTrigger={deliberationRounds.length === 0}
+              onTrigger={handleTriggerDeliberation}
+              onDecide={async (findingId, decision) => {
+                if (!activeSession?.record_id) return;
+                try {
+                  const result = await decideDeliberationFinding(activeSession.record_id as string, findingId, decision as 'accept' | 'reject' | 'defer');
+                  setDeliberationRounds(prev => prev.map((round) => ({
+                    ...round,
+                    findings: ((round.findings as Record<string, unknown>[] | undefined) || []).map((finding) => (
+                      (finding as Record<string, unknown>).finding_id === findingId ? { ...finding, pm_decision: decision } : finding
+                    )),
+                  })));
+                  if (result.current_phase) setPhase(result.current_phase as string);
+                  toast.success('已更新审查裁决');
+                } catch {
+                  toast.error('更新裁决失败');
+                }
+              }}
+              loading={loading}
+            />
+
+            <div className="rounded border border-slate-200 p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-slate-700">开发前准备</h3>
+                <button onClick={handleGenerateTechnicalRoute} disabled={loading}
+                  className="rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+                  生成路线
+                </button>
+              </div>
+              {!technicalRoute ? (
+                <p className="text-xs text-slate-400">需求冻结后生成技术路线</p>
+              ) : (
+                <div className="space-y-2">
+                  <div className="rounded bg-slate-50 p-2">
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <span className="text-[10px] text-slate-400">{technicalRoute.status as string}</span>
+                      <span className="text-[10px] text-slate-400">{technicalRoute.route_id as string}</span>
+                    </div>
+                    <p className="text-xs leading-relaxed text-slate-700">{technicalRoute.architecture_summary as string}</p>
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {((technicalRoute.tool_needs as string[] | undefined) || []).map((need) => (
+                        <span key={need} className="rounded bg-white px-1.5 py-0.5 text-[10px] text-slate-500">{need}</span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex gap-1">
+                    <button onClick={() => handleConfirmTechnicalRoute('accepted')}
+                      className="rounded border border-emerald-200 px-2 py-1 text-[11px] text-emerald-700 hover:bg-emerald-50">
+                      采用
+                    </button>
+                    <button onClick={() => handleConfirmTechnicalRoute('revision_requested')}
+                      className="rounded border border-orange-200 px-2 py-1 text-[11px] text-orange-700 hover:bg-orange-50">
+                      修订
+                    </button>
+                    <button onClick={handleTriggerToolDiscovery}
+                      className="rounded border border-blue-200 px-2 py-1 text-[11px] text-blue-700 hover:bg-blue-50">
+                      工具发现
+                    </button>
+                  </div>
+                  {toolDiscoveryResults.length > 0 && (
+                    <div className="space-y-2">
+                      {toolDiscoveryResults.map((result) => (
+                        <div key={result.discovery_id as string} className="rounded bg-slate-50 p-2">
+                          <p className="text-[10px] text-slate-400">{result.tool_need as string}</p>
+                          {((result.candidates as Record<string, unknown>[] | undefined) || []).slice(0, 3).map((candidate) => (
+                            <div key={candidate.candidate_id as string} className="mt-1 text-xs text-slate-700">
+                              {candidate.name as string}
+                              <span className="ml-1 text-[10px] text-slate-400">{candidate.source as string}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
 
             {phase === 'relationship' && featureTree && (
               <RelationshipGraph edges={[]} conflicts={[]} />
             )}
 
-            {phase === 'complete' && (specPreview || activeSession?.is_complete) && (
+            {phase === 'complete' && Boolean(specPreview || activeSession?.is_complete) && (
               <SpecPreview markdown={specPreview || '需求已完整，正在生成 Spec 文档...'} />
             )}
 
@@ -303,7 +547,6 @@ export default function BrainstormPage() {
                      try {
                        const result = await resumeSession(s.record_id as string);
                        setActiveSession(result);
-                       setQuestions((result.questions as string[]) || []);
                        // Restore full conversation history
                        const history = result.conversation_history as Message[] | undefined;
                        if (history && history.length > 0) {
@@ -313,15 +556,17 @@ export default function BrainstormPage() {
                            { role: 'assistant', content: formatAssistantContent((result.questions as string[]) || []) },
                          ]);
                        }
-                       if (result.phase) setPhase(result.phase);
+                       if (result.phase) setPhase(result.phase as string);
+                       setCurrentQuestion((result.current_question as Record<string, unknown> | null) || null);
                        if (result.feature_tree) {
                          setFeatureTree(result.feature_tree as Record<string, unknown>);
-                         const nodes = (result.feature_tree as Record<string, unknown>).nodes as Record<string, Record<string, unknown>>;
+                         const nodes = (result.feature_tree as Record<string, unknown>).nodes as Record<string, BrainstormFeatureNode>;
                          const exploringId = (result.feature_tree as Record<string, unknown>).current_exploring_id as string;
                          if (exploringId && nodes?.[exploringId]) setActiveNode(nodes[exploringId]);
                        }
                        if (result.spec_preview) setSpecPreview(result.spec_preview as string);
-                       if (result.handoff_hints) setHandoffHints(result.handoff_hints as Record<string, unknown>[]);
+                       if (result.handoff_hints) setHandoffHints(result.handoff_hints as HandoffHint[]);
+                       syncV3State(result);
                      } catch { toast.error('恢复会话失败'); }
                    }}
                    className="w-full text-left py-1.5 border-b border-slate-100 last:border-0 hover:bg-slate-50 -mx-1 px-1 rounded transition-colors">
