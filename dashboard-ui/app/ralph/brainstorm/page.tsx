@@ -104,13 +104,16 @@ export default function BrainstormPage() {
         const latest = sessionList[0];
         await resumeAndSetSession(latest.record_id as string);
       }
-    } catch { toast.error('加载失败'); }
+    } catch (e) {
+      toast.error('加载失败: ' + (e instanceof Error ? e.message : '未知错误'));
+    }
     finally { setLoaded(true); }
   };
 
   const resumeAndSetSession = async (recordId: string) => {
     try {
       const result = await resumeSession(recordId);
+      // 必须同步设置所有状态，确保一次性渲染
       setActiveSession(result);
       // Restore conversation history
       const history = result.conversation_history as Message[] | undefined;
@@ -132,8 +135,8 @@ export default function BrainstormPage() {
       if (result.spec_preview) setSpecPreview(result.spec_preview as string);
       if (result.handoff_hints) setHandoffHints(result.handoff_hints as HandoffHint[]);
       syncV3State(result);
-    } catch {
-      toast.error('恢复会话失败');
+    } catch (e) {
+      toast.error('恢复会话失败: ' + (e instanceof Error ? e.message : '未知错误'));
     }
   };
 
@@ -159,14 +162,41 @@ export default function BrainstormPage() {
   useEffect(() => {
     if (checkedRef.current) return;
     checkedRef.current = true;
-    if (!currentProject) {
-      toast.error('请先打开一个项目');
-      router.push('/ralph/projects');
-      return;
-    }
-    const timer = window.setTimeout(() => { void load(); }, 0);
-    return () => window.clearTimeout(timer);
-  }, [currentProject, router]);
+
+    const initialize = async () => {
+      // 如果 currentProject 为空，尝试从 recentProjects 恢复
+      let project = currentProject;
+      if (!project) {
+        let { recentProjects } = useRalphStore.getState();
+        // 如果 recentProjects 尚未加载（sidebar 还没跑完），自己获取
+        if (recentProjects.length === 0) {
+          try {
+            const { listRecentProjects } = await import('@/lib/ralph-api');
+            recentProjects = await listRecentProjects();
+            useRalphStore.setState({ recentProjects });
+          } catch {
+            // 后端无响应
+          }
+        }
+        if (recentProjects.length > 0) {
+          const latest = recentProjects[0];
+          project = { name: latest.name, path: latest.path };
+          useRalphStore.setState({ currentProject: project });
+        }
+      }
+
+      if (!project) {
+        toast.error('请先打开一个项目');
+        router.push('/ralph/projects');
+        return;
+      }
+
+      const timer = window.setTimeout(() => { void load(); }, 0);
+      return () => window.clearTimeout(timer);
+    };
+
+    void initialize();
+  }, []);
 
   const handleStart = async () => {
     if (!input || !currentProject) return;
@@ -324,7 +354,12 @@ export default function BrainstormPage() {
             </div>
           )}
 
-          {!activeSession ? (
+          {!activeSession && !loaded ? (
+            <div className="flex-1 flex flex-col items-center justify-center text-center p-6 bg-slate-50/30">
+              <RefreshCw size={32} className="text-slate-300 mb-4 animate-spin" />
+              <p className="text-sm text-slate-500">加载中...</p>
+            </div>
+          ) : !activeSession ? (
             <div className="flex-1 flex flex-col items-center justify-center text-center p-6 bg-slate-50/30">
               <MessageCircle size={32} className="text-slate-300 mb-4" />
               <p className="text-sm text-slate-500 mb-3">描述你想做的项目，我会慢慢问清楚</p>

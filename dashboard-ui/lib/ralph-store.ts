@@ -124,8 +124,45 @@ type RalphStore = RalphState & RalphActions
 
 const MAX_TABS = 8
 const TABS_STORAGE_KEY = 'ralph-tabs'
+const CURRENT_PROJECT_STORAGE_KEY = 'ralph-current-project'
 
 // ==================== Helper Functions ====================
+
+/**
+ * 从 localStorage 恢复 currentProject
+ */
+function loadCurrentProjectFromStorage(): { name: string; path: string } | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  try {
+    const stored = localStorage.getItem(CURRENT_PROJECT_STORAGE_KEY)
+    if (stored) {
+      return JSON.parse(stored) as { name: string; path: string }
+    }
+  } catch {
+    // 解析失败，忽略
+  }
+  return null
+}
+
+/**
+ * 保存 currentProject 到 localStorage
+ */
+function saveCurrentProjectToStorage(project: { name: string; path: string } | null): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+  try {
+    if (project) {
+      localStorage.setItem(CURRENT_PROJECT_STORAGE_KEY, JSON.stringify(project))
+    } else {
+      localStorage.removeItem(CURRENT_PROJECT_STORAGE_KEY)
+    }
+  } catch {
+    // 保存失败，忽略
+  }
+}
 
 /**
  * 从 localStorage 恢复 tabs
@@ -307,7 +344,7 @@ const createRalphStore = (initialTabs: Tab[] = []) =>
 
         pendingCommandCount: 0,
 
-        currentProject: null,
+        currentProject: loadCurrentProjectFromStorage(),
         recentProjects: [],
         projectAnalysis: null,
 
@@ -528,7 +565,10 @@ const createRalphStore = (initialTabs: Tab[] = []) =>
         },
 
         // Project actions
-        setCurrentProject: (project) => set({ currentProject: project }),
+        setCurrentProject: (project) => {
+          set({ currentProject: project })
+          saveCurrentProjectToStorage(project)
+        },
         setRecentProjects: (projects) => set({ recentProjects: projects }),
         setProjectAnalysis: (analysis) => set({ projectAnalysis: analysis }),
         fetchSummary: async () => {
