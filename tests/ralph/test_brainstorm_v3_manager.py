@@ -276,6 +276,7 @@ def test_process_proactive_response_advances_phase():
 
         mgr._process_proactive_response(record, "Web 端为主")
         mgr.advance_phase(record)
+        mgr.confirm_phase(record)
 
         assert record.current_phase == BrainstormPhase.PRODUCT_DEF
         # 核心类别已被自动确认

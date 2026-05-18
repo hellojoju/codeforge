@@ -146,6 +146,8 @@ def manager():
 def test_v2_start_session(manager):
     record = manager.start_session("测试项目", "我想做一个博客系统")
     assert record.record_id.startswith("bs-")
+    # V3: start_session 现在从 PROACTIVE_ANALYSIS 开始，V2 测试需要手动推进
+    record.current_phase = BrainstormPhase.PRODUCT_DEF
     assert record.current_phase == "product_def"
     assert "fn-root" in record.feature_tree.nodes
     assert record.feature_tree.current_exploring_id == "fn-root"
@@ -164,6 +166,8 @@ def test_v2_load_roundtrip(manager):
 
 def test_v2_resume_session(manager):
     record = manager.start_session("Resume项目", "测试恢复")
+    record.current_phase = BrainstormPhase.PRODUCT_DEF
+    manager._save(record)  # 持久化 phase 变更
     resumed = manager.resume_session(record.record_id)
     assert resumed is not None
     assert resumed.current_phase == "product_def"
@@ -199,7 +203,8 @@ def test_phase1_build_question_plan(manager):
 def test_phase1_explore_product(manager):
     record = manager.start_session("博客系统", "我想做一个个人博客")
     questions = manager.explore_product(record)
-    assert len(questions) >= 1
+    # V3: explore_product 返回空列表，前端用 ProductDefPanel 展示多 Agent 分析结果
+    assert isinstance(questions, list)
 
 
 def test_phase1_process_response(manager):
@@ -299,6 +304,7 @@ def test_phase2_generate_node_questions(manager):
 
 def test_advance_phase_product_incomplete(manager):
     record = manager.start_session("项目", "描述")
+    record.current_phase = BrainstormPhase.PRODUCT_DEF
     result = manager.advance_phase(record)
     assert result is False
     assert record.current_phase == "product_def"
@@ -306,6 +312,7 @@ def test_advance_phase_product_incomplete(manager):
 
 def test_advance_phase_product_to_decompose(manager):
     record = manager.start_session("博客系统", "做一个博客")
+    record.current_phase = BrainstormPhase.PRODUCT_DEF
     root = record.feature_tree.get_node("fn-root")
     root.vision = "技术博客"
     root.target_users = ["开发者"]
@@ -314,8 +321,16 @@ def test_advance_phase_product_to_decompose(manager):
     root.mvp_scope = ["写文章"]
     root.out_of_scope = ["评论"]
 
+    # advance_phase 只检查守卫并创建快照，不实际推进
     result = manager.advance_phase(record)
     assert result is True
+    assert record.current_phase == "product_def"
+    # 快照已创建
+    assert "product_def" in record.phase_outputs
+
+    # confirm_phase 才实际推进
+    new_phase = manager.confirm_phase(record)
+    assert new_phase == "feature_decompose"
     assert record.current_phase == "feature_decompose"
     # 自动拆分应该创建了子节点
     assert len(root.children) > 0
@@ -323,6 +338,7 @@ def test_advance_phase_product_to_decompose(manager):
 
 def test_process_response_v2_routes_to_phase(manager):
     record = manager.start_session("博客系统", "做一个博客")
+    record.current_phase = BrainstormPhase.PRODUCT_DEF
     assert record.current_phase == "product_def"
     # Phase 1 回复处理不应该报错
     manager._process_product_response(record, "技术博客平台")
@@ -477,7 +493,7 @@ def test_e2e_full_brainstorm_flow(manager):
     """完整流程：Phase 1 → Phase 2 → Phase 3 → Phase 4 → Complete"""
     # Phase 1: 产品定义
     record = manager.start_session("测试项目", "我想做一个任务管理系统")
-    assert record.current_phase == "product_def"
+    record.current_phase = BrainstormPhase.PRODUCT_DEF
 
     # 补齐产品定义所有字段
     root = record.feature_tree.get_node("fn-root")
@@ -491,6 +507,9 @@ def test_e2e_full_brainstorm_flow(manager):
     assert manager._check_product_complete(root) is True
     result = manager.advance_phase(record)
     assert result is True
+    assert record.current_phase == "product_def"
+    new_phase = manager.confirm_phase(record)
+    assert new_phase == "feature_decompose"
     assert record.current_phase == "feature_decompose"
 
     # Phase 2: 自动拆分后应该有子节点
@@ -526,23 +545,43 @@ def test_e2e_full_brainstorm_flow(manager):
     # 其他子节点也全部确认
     _confirm_all_children(record)
 
+    # 推进到 DELIBERATION_REVIEW
+    manager.confirm_phase(record)
+    assert record.current_phase == BrainstormPhase.DELIBERATION_REVIEW
+
+    # V3: 添加已解决的 deliberation round 以通过守卫
+    from ralph.schema.brainstorm_record import DeliberationRound, DeliberationFinding
+    record.deliberation_rounds.append(DeliberationRound(
+        round_id="dr-e2e",
+        findings=[
+            DeliberationFinding(
+                finding_id="f1", dimension="feature_completeness_reviewer",
+                affected_feature_ids=[root.children[0]],
+                finding="无问题", severity="low",
+                suggested_change="无",
+                pm_decision="accept",
+            )
+        ],
+    ))
+
     # 推进到关系分析
-    result = manager.advance_phase(record)
-    assert result is True
+    manager.confirm_phase(record)
     assert record.current_phase == "relationship"
 
     # Phase 3: 关系分析
     record.relationship_graph.analyzed_at = _now_iso()
-    result = manager.advance_phase(record)
-    assert result is True
+    manager.confirm_phase(record)
     assert record.current_phase == "independent_review"
 
     # Phase 4: 独立审查
     from ralph.brainstorm_analyzer import BrainstormAnalyzer
     analyzer = BrainstormAnalyzer()
     analyzer.independent_review(record)
-    result = manager.advance_phase(record)
-    assert result is True
+    manager.confirm_phase(record)
+    assert record.current_phase == BrainstormPhase.REQUIREMENTS_READY
+
+    # V3: 从 REQUIREMENTS_READY 推进到 COMPLETE
+    manager.confirm_phase(record)
     assert record.current_phase == "complete"
 
     # 验证 Spec 生成
@@ -557,7 +596,7 @@ def test_e2e_full_brainstorm_flow(manager):
 def test_e2e_process_response_v2_routing(manager):
     """测试 process_response_v2 的路由逻辑"""
     record = manager.start_session("路由项目", "描述")
-    assert record.current_phase == "product_def"
+    record.current_phase = BrainstormPhase.PRODUCT_DEF
 
     # Phase 1 回复处理
     manager._build_product_question_plan(record)
@@ -585,6 +624,7 @@ def test_e2e_process_response_v2_routing(manager):
 def test_e2e_spec_export_roundtrip(manager, tmp_path):
     """Spec 导出往返测试"""
     record = manager.start_session("导出项目", "测试")
+    record.current_phase = BrainstormPhase.PRODUCT_DEF
     root = record.feature_tree.get_node("fn-root")
     root.vision = "测试愿景"
     root.target_users = ["测试用户"]
@@ -593,7 +633,8 @@ def test_e2e_spec_export_roundtrip(manager, tmp_path):
     root.mvp_scope = ["范围"]
     root.out_of_scope = ["不做"]
 
-    manager.advance_phase(record)
+    manager.confirm_phase(record)
+    assert record.current_phase == "feature_decompose"
 
     output = tmp_path / "spec.md"
     path = manager.export_spec(record.record_id, str(output))
@@ -737,6 +778,7 @@ def test_handoff_gaps(tmp_path):
 def test_decompose_response_triggers_relationship_analysis(manager):
     """Phase 2 所有节点确认后自动触发关系分析"""
     record = manager.start_session("TestProject", "一个待办应用")
+    record.current_phase = BrainstormPhase.PRODUCT_DEF
 
     # 模拟 Phase 1 完成：填充产品定义
     root = record.feature_tree.get_node("fn-root")
@@ -749,7 +791,7 @@ def test_decompose_response_triggers_relationship_analysis(manager):
 
     # 手动推进到 Phase 2
     mgr = manager
-    mgr.advance_phase(record)
+    mgr.confirm_phase(record)
     assert record.current_phase == "feature_decompose"
 
     # 自动拆分后应该有子节点，补全并确认所有子节点
@@ -774,6 +816,21 @@ def test_decompose_response_triggers_relationship_analysis(manager):
             )
             child.status = "confirmed"
             child.confirmed_at = _now_iso()
+
+    # 添加已解决的 deliberation round 以通过 V3 守卫
+    from ralph.schema.brainstorm_record import DeliberationRound, DeliberationFinding
+    record.deliberation_rounds.append(DeliberationRound(
+        round_id="dr-decompose",
+        findings=[
+            DeliberationFinding(
+                finding_id="f1", dimension="feature_completeness_reviewer",
+                affected_feature_ids=list(root.children),
+                finding="无问题", severity="low",
+                suggested_change="无",
+                pm_decision="accept",
+            )
+        ],
+    ))
 
     # 模拟 respond 触发 decompose 处理
     mgr.process_response_v2(record, "继续", extracted_facts=[])

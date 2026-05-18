@@ -412,6 +412,47 @@ export interface ProactiveAnalysis {
   confirmed_at: string;
 }
 
+export interface ProductDefFinding {
+  finding_id: string;
+  dimension: string;
+  dimension_name: string;
+  content: string;
+  suggestions: string[];
+  questions: string[];
+  confidence: number;
+  status: string;
+  user_revision: string;
+  pm_decision: string;
+  pm_reason: string;
+}
+
+export interface ProductDefRound {
+  round_id: string;
+  findings: ProductDefFinding[];
+  summary: string;
+  created_at: string;
+  confirmed_at: string;
+}
+
+export interface ProductDefProgress {
+  total_dimensions: number;
+  dimensions_analyzed: string[];
+  current_dimension: string | null;
+  partial_findings: ProductDefFinding[];
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface PhaseOutputSnapshot {
+  phase: string;
+  label: string;
+  completed_at: string;
+  confirmed: boolean;
+  confirmed_at: string;
+  summary: string;
+  detail: Record<string, unknown>;
+}
+
 export interface DeliberationFinding {
   finding_id: string;
   dimension: string;

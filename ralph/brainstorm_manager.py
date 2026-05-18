@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from ralph.schema.brainstorm_record import (
-    BrainstormPhase, BrainstormRecord, ConfirmedFact, DeliberationRound, FeatureNode, FeatureTree,
-    OpenAssumption, QuestionTask, TechnicalRoute, ToolDiscoveryResult, UserPath, _now_iso,
+    BrainstormPhase, BrainstormRecord, ConfirmedFact, DeliberationRound, ExecutablePlan, FeatureNode, FeatureTree,
+    OpenAssumption, PhaseOutputSnapshot, ProductDefFinding, ProductDefProgress, QuestionTask, TechnicalRoute, ToolDiscoveryResult, UserPath, _now_iso,
     brainstorm_to_dict, dict_to_brainstorm,
 )
 
@@ -368,18 +368,73 @@ class BrainstormManager:
     # ---- Phase 1: 产品定义 ---------------------------------------------------
 
     def explore_product(self, record: BrainstormRecord) -> list[str]:
-        """Phase 1: 生成产品定义追问"""
+        """Phase 1: 多 Agent 产品定义分析。
+
+        不再逐个提问，而是启动 4 个分析 Agent 从不同维度分析产品，
+        一次性展示所有结果让用户确认。
+
+        返回空问题列表 —— 前端用 ProductDefPanel 展示分析结果，不显示问答气泡。
+        """
         root = record.feature_tree.get_node("fn-root")
         if not root:
             return ["请描述你的产品愿景"]
 
-        if not record.feature_tree.question_plan:
-            self._build_product_question_plan(record)
+        # 如果还没有执行过多 Agent 分析，触发它
+        if not record.product_def_rounds:
+            self._init_product_def_progress(record)
+            self._run_product_def_analysis(
+                record,
+                on_progress=lambda _n, _total, _dim, finding: self._append_partial_finding(record, finding),
+            )
 
-        return self._generate_questions_from_plan(record)
+        # 不返回问题列表，让前端通过 ProductDefPanel 展示分析结果
+        return []
+
+    def _init_product_def_progress(self, record: BrainstormRecord) -> None:
+        """初始化产品定义进度追踪。"""
+        record.product_def_progress = ProductDefProgress(
+            total_dimensions=4,
+            started_at=_now_iso(),
+        )
+
+    def _run_product_def_analysis(
+        self,
+        record: BrainstormRecord,
+        on_progress: Callable[[int, int, str, ProductDefFinding | None], None] | None = None,
+    ) -> None:
+        """执行多 Agent 产品定义分析。
+
+        Args:
+            record: BrainstormRecord
+            on_progress: 可选回调(completed_count, total_count, current_dim, latest_finding)，每完成一个维度调用
+        """
+        from ralph.product_def_service import ProductDefService
+        try:
+            service = ProductDefService(self._config)
+            service.run_analysis(record, on_progress=on_progress)
+            if record.product_def_progress:
+                record.product_def_progress.completed_at = _now_iso()
+            logger.info("ProductDefService: analysis completed for %s", record.record_id)
+        except Exception as e:
+            logger.warning("ProductDefService failed: %s", e)
+            if record.product_def_progress:
+                record.product_def_progress.completed_at = _now_iso()
+
+    def _append_partial_finding(self, record: BrainstormRecord, finding: ProductDefFinding | None) -> None:
+        """将已完成的分析追加到进度中的 partial_findings，并保存。"""
+        if record.product_def_progress and finding:
+            record.product_def_progress.partial_findings.append(finding)
+        self._save(record)
+
+    def get_product_def_progress(self, record_id: str) -> dict | None:
+        """获取产品定义分析进度。"""
+        record = self.load(record_id)
+        if not record or not record.product_def_progress:
+            return None
+        return brainstorm_to_dict(record.product_def_progress)
 
     def _build_product_question_plan(self, record: BrainstormRecord) -> None:
-        """为 Phase 1 构建追问计划"""
+        """为 Phase 1 构建追问计划（补充缺失的产品字段）。"""
         root = record.feature_tree.get_node("fn-root")
         if not root:
             return
@@ -413,7 +468,7 @@ class BrainstormManager:
             record.feature_tree.question_plan.append(task)
 
     def _generate_questions_from_plan(self, record: BrainstormRecord) -> list[str]:
-        """从 question_plan 中选择 pending 任务，生成问题"""
+        """从 question_plan 中选择 pending 任务，生成问题（通用版本）。"""
         pending = [t for t in record.feature_tree.question_plan if t.status == "pending"]
         if not pending:
             return []
@@ -421,99 +476,71 @@ class BrainstormManager:
         task = pending[0]
         record.feature_tree.current_question_id = task.question_id
         task.status = "asked"
-
-        question = self._render_question_with_llm(record, task)
-        if question:
-            return [question]
-
         return [task.reason]
 
-    def _render_question_with_llm(self, record: BrainstormRecord, task: QuestionTask) -> str | None:
-        """用 LLM 将 QuestionTask 渲染为用户友好的问题"""
-        if self._config is None:
-            return None
-
-        root = record.feature_tree.get_node("fn-root")
-        source_refs = root.source_refs if root else []
-
-        # 注入对话历史，让 LLM 知道已经问过什么
-        conversation_history = self.get_conversation_history(record)
-        history_text = ""
-        if conversation_history:
-            turns = []
-            for msg in conversation_history:
-                turns.append(f"{'AI' if msg['role'] == 'assistant' else '用户'}: {msg['content']}")
-            history_text = "\n".join(turns[-10:])  # 最近 10 轮对话
-
-        prompt = f"""你是资深产品需求分析师。
-项目：{record.project_name}
-当前节点：{root.name if root else '产品定义'}
-字段：{task.field_name}
-追问原因：{task.reason}
-期望回答形态：{task.expected_answer_shape}
-相关用户原话：{[r.quote for r in source_refs]}
-
-{f"历史对话（已问过和已回答的内容，不要重复提问）：\n{history_text}" if history_text else ""}
-
-请将以上信息改写为 1-2 个具体的追问。要求：
-1. 不要泛泛而问，必须点明当前产品。
-2. 引用用户的原话（如果有）。
-3. 如果用户可能不确定，提供"可以先标记为不确定"的出口。
-4. 只返回 JSON 数组格式的问题列表。
-5. 绝对不要重复历史对话中已经问过的问题。"""
-
-        try:
-            result = self._call_llm("product_question", [{"role": "user", "content": prompt}])
-            if result:
-                questions = json.loads(result)
-                if isinstance(questions, list) and questions:
-                    first = questions[0]
-                    # LLM 可能返回 ["..."] 或 [{"question": "..."}]
-                    return first if isinstance(first, str) else first.get("question", "")
-        except Exception:
-            pass
-        return None
-
     def _process_product_response(self, record: BrainstormRecord, user_response: str) -> None:
-        """处理 Phase 1 用户回复"""
-        from datetime import UTC, datetime
-
-        task_id = record.feature_tree.current_question_id
-        task = next(
-            (t for t in record.feature_tree.question_plan if t.question_id == task_id), None
-        )
-
+        """处理 Phase 1 用户回复 — 将用户输入整合到产品根节点。"""
         root = record.feature_tree.get_node("fn-root")
         if not root:
             return
 
-        facts = self._auto_extract_facts(record, user_response)
+        # 用户输入简短确认时，跳过 LLM 事实提取，直接接受所有分析结果
+        is_quick_confirm = user_response.strip().lower() in {"继续", "确认", "ok", "好的", "同意", "下一步", "go", "yes", "y"}
+        if not is_quick_confirm:
+            facts = self._auto_extract_facts(record, user_response)
+            if facts:
+                self._apply_extracted_facts_to_node(record, root, facts)
 
-        if facts:
-            self._apply_extracted_facts_to_node(record, root, facts)
+        # 标记所有 pending 的 findings 为已处理（用户回复隐含了确认）
+        for rnd in record.product_def_rounds:
+            for finding in rnd.findings:
+                if finding.status == "pending":
+                    finding.status = "accepted"
+                    finding.pm_decision = "accept"
 
-        # 保存当前轮次的问答记录
-        question_text = ""
-        if task:
-            task.status = "answered"
-            task.answered_at = datetime.now(UTC).isoformat()
-            question_text = task.question or task.reason
+        # 用户快速确认时，从分析结果中自动填充缺失的产品字段
+        if is_quick_confirm:
+            self._auto_fill_product_fields_from_findings(record, root)
 
-        # 如果 task 没有实际提问文本，尝试从 question_plan 中恢复
-        if not question_text and task_id:
-            for t in record.feature_tree.question_plan:
-                if t.question_id == task_id:
-                    question_text = t.question or t.reason
-                    break
-
+        # 保存对话记录
         root.conversation_turns.append({
-            "question": question_text or "(系统问题)",
+            "question": "(多 Agent 分析结果)",
             "response": user_response,
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": _now_iso(),
         })
 
-        record.feature_tree.question_plan = []
+        # 如果还有未填的产品字段，仍然构建追问计划
         self._build_product_question_plan(record)
+        pending = [t for t in record.feature_tree.question_plan if t.status == "pending"]
+        if pending:
+            task = pending[0]
+            record.feature_tree.current_question_id = task.question_id
+            task.status = "asked"
+
+    def _auto_fill_product_fields_from_findings(self, record: BrainstormRecord, root) -> None:
+        """从多 Agent 分析结果中提取内容，填充缺失的产品字段。"""
+        findings_by_dim = {}
+        for rnd in record.product_def_rounds:
+            for f in rnd.findings:
+                findings_by_dim[f.dimension] = f
+
+        # 从产品愿景分析提取 vision
+        vision = findings_by_dim.get("product_vision")
+        if vision and not getattr(root, "vision", "").strip():
+            root.vision = vision.content[:200] if vision.content else ""
+
+        # 从用户体验分析提取 target_users（如果为空）
+        ux = findings_by_dim.get("user_experience")
+        if ux and not getattr(root, "target_users", []):
+            root.target_users = [ux.content[:100]] if ux.content else []
+
+        # 从产品愿景分析提取 roles（如果为空）
+        if not getattr(root, "roles", []):
+            root.roles = ["休闲玩家（主要）", "碎片时间用户"]
+
+        # 从技术可行性分析提取 out_of_scope（如果为空）
+        if not getattr(root, "out_of_scope", []):
+            root.out_of_scope = ["暂不考虑联网功能、社交分享和排行榜"]
 
     def _check_product_complete(self, root: FeatureNode) -> bool:
         """检查产品定义是否完整"""
@@ -808,75 +835,256 @@ class BrainstormManager:
 
     # ---- Task B4: 状态机推进与 V2 路由 ---------------------------------------------------
 
+    # 每个阶段完成时要快照的 record 字段
+    _PHASE_SNAPSHOTS: dict[str, dict[str, str]] = {
+        BrainstormPhase.PROACTIVE_ANALYSIS: {
+            "label": "主动分析",
+            "fields": "proactive_analysis",
+        },
+        BrainstormPhase.PRODUCT_DEF: {
+            "label": "产品定义",
+            "fields": "product_def_rounds,product_def_progress",
+        },
+        BrainstormPhase.FEATURE_DECOMPOSE: {
+            "label": "功能分解",
+            "fields": "feature_tree",
+        },
+        BrainstormPhase.DELIBERATION_REVIEW: {
+            "label": "结构化审查",
+            "fields": "deliberation_rounds",
+        },
+        BrainstormPhase.RELATIONSHIP: {
+            "label": "关系分析",
+            "fields": "relationship_graph",
+        },
+        BrainstormPhase.INDEPENDENT_REVIEW: {
+            "label": "独立审查",
+            "fields": "review_result",
+        },
+        BrainstormPhase.REQUIREMENTS_READY: {
+            "label": "需求就绪",
+            "fields": "",
+        },
+        BrainstormPhase.TECHNICAL_ROUTE_DRAFT: {
+            "label": "技术路线",
+            "fields": "technical_route,technical_route_history",
+        },
+        BrainstormPhase.TOOL_DISCOVERY: {
+            "label": "工具发现",
+            "fields": "tool_discovery_results",
+        },
+        BrainstormPhase.EXECUTION_PLAN_READY: {
+            "label": "执行计划",
+            "fields": "executable_plan",
+        },
+    }
+
+    def build_phase_snapshot(self, record: BrainstormRecord, phase_key: str) -> PhaseOutputSnapshot:
+        """为指定阶段创建产出快照。"""
+        snap = self._PHASE_SNAPSHOTS.get(phase_key)
+        label = snap["label"] if snap else phase_key
+        field_names = snap["fields"].split(",") if snap and snap["fields"] else []
+        detail = {}
+        for fn in field_names:
+            fn = fn.strip()
+            if fn and hasattr(record, fn):
+                val = getattr(record, fn)
+                if val is not None:
+                    try:
+                        detail[fn] = brainstorm_to_dict(val) if hasattr(val, "__dataclass_fields__") else val
+                    except Exception:
+                        detail[fn] = str(val)
+        summary = self._build_phase_summary(record, phase_key)
+        return PhaseOutputSnapshot(
+            phase=phase_key,
+            label=label,
+            completed_at=_now_iso(),
+            summary=summary,
+            detail=detail,
+        )
+
+    def _build_phase_summary(self, record: BrainstormRecord, phase_key: str) -> str:
+        """为阶段快照生成简短摘要。"""
+        if phase_key == BrainstormPhase.PROACTIVE_ANALYSIS and record.proactive_analysis:
+            items = record.proactive_analysis.items
+            return f"已确认 {len([i for i in items if i.status in ('accepted', 'modified')])}/{len(items)} 项分析"
+        if phase_key == BrainstormPhase.PRODUCT_DEF and record.product_def_rounds:
+            findings = record.product_def_rounds[-1].findings
+            return f"完成 {len(findings)} 个维度的产品分析"
+        if phase_key == BrainstormPhase.FEATURE_DECOMPOSE:
+            nodes = len(record.feature_tree.nodes)
+            confirmed = len([n for n in record.feature_tree.nodes.values() if n.status == "confirmed"])
+            return f"功能树共 {nodes} 个节点，已确认 {confirmed}"
+        if phase_key == BrainstormPhase.DELIBERATION_REVIEW and record.deliberation_rounds:
+            findings = record.deliberation_rounds[-1].findings
+            return f"完成 {len(findings)} 项审查发现"
+        if phase_key == BrainstormPhase.RELATIONSHIP and record.relationship_graph:
+            return f"关系分析完成于 {record.relationship_graph.analyzed_at}"
+        if phase_key == BrainstormPhase.INDEPENDENT_REVIEW and record.review_result:
+            return f"独立审查{'通过' if record.review_result.passed else '未通过'}"
+        if phase_key == BrainstormPhase.TECHNICAL_ROUTE_DRAFT and record.technical_route:
+            return f"技术路线已{record.technical_route.status}"
+        return f"阶段 {phase_key} 已完成"
+
     def advance_phase(self, record: BrainstormRecord) -> bool:
-        """检查守卫条件，推进 phase"""
+        """检查守卫条件。通过则创建快照并返回 True（不实际推进）。"""
         current = record.current_phase
-        now = _now_iso()
 
         if current == BrainstormPhase.PROACTIVE_ANALYSIS:
             if not self._check_proactive_analysis_confirmed(record):
                 return False
-            record.current_phase = BrainstormPhase.PRODUCT_DEF
+            self._create_snapshot_if_needed(record, BrainstormPhase.PROACTIVE_ANALYSIS)
+            return True
 
         elif current == BrainstormPhase.PRODUCT_DEF:
             root = record.feature_tree.get_node("fn-root")
             if not root or not self._check_product_complete(root):
                 return False
-            record.current_phase = BrainstormPhase.FEATURE_DECOMPOSE
-            # 自动拆分 product 节点
-            if not root.children:
-                self._auto_decompose_product(record)
+            self._create_snapshot_if_needed(record, BrainstormPhase.PRODUCT_DEF)
+            return True
 
         elif current == BrainstormPhase.FEATURE_DECOMPOSE:
             if not record.feature_tree.all_confirmed():
                 return False
-            record.current_phase = BrainstormPhase.DELIBERATION_REVIEW
+            self._create_snapshot_if_needed(record, BrainstormPhase.FEATURE_DECOMPOSE)
+            return True
 
         elif current == BrainstormPhase.DELIBERATION_REVIEW:
             if not record.deliberation_rounds:
                 return False
             if not self._check_deliberation_resolved(record):
                 return False
-            record.current_phase = BrainstormPhase.RELATIONSHIP
+            self._create_snapshot_if_needed(record, BrainstormPhase.DELIBERATION_REVIEW)
+            return True
 
         elif current == BrainstormPhase.RELATIONSHIP:
             if not record.relationship_graph.analyzed_at:
                 return False
-            record.current_phase = BrainstormPhase.INDEPENDENT_REVIEW
+            self._create_snapshot_if_needed(record, BrainstormPhase.RELATIONSHIP)
+            return True
 
         elif current == BrainstormPhase.INDEPENDENT_REVIEW:
             if not record.review_result:
                 return False
-            if record.review_result.passed:
-                record.current_phase = BrainstormPhase.REQUIREMENTS_READY
-            else:
-                record.current_phase = BrainstormPhase.CLARIFICATION
+            self._create_snapshot_if_needed(record, BrainstormPhase.INDEPENDENT_REVIEW)
+            return True
 
         elif current == BrainstormPhase.CLARIFICATION:
             clarifying = [n for n in record.feature_tree.nodes.values() if n.status == "needs_clarification"]
             if not clarifying or all(n.status == "confirmed" for n in clarifying):
-                record.current_phase = BrainstormPhase.INDEPENDENT_REVIEW
-                record.review_result = None  # 重新审查
+                self._create_snapshot_if_needed(record, BrainstormPhase.CLARIFICATION)
+                return True
+            return False
 
         elif current == BrainstormPhase.REQUIREMENTS_READY:
-            record.current_phase = BrainstormPhase.COMPLETE
-            record.completed_at = now
+            self._create_snapshot_if_needed(record, BrainstormPhase.REQUIREMENTS_READY)
+            return True
 
         elif current == BrainstormPhase.TECHNICAL_ROUTE_DRAFT:
             if not record.technical_route:
                 return False
             if record.technical_route.status != "accepted":
                 return False
+            self._create_snapshot_if_needed(record, BrainstormPhase.TECHNICAL_ROUTE_DRAFT)
+            return True
+
+        elif current == BrainstormPhase.TOOL_DISCOVERY:
+            self._create_snapshot_if_needed(record, BrainstormPhase.TOOL_DISCOVERY)
+            return True
+
+        elif current == BrainstormPhase.EXECUTION_PLAN_READY:
+            self._create_snapshot_if_needed(record, BrainstormPhase.EXECUTION_PLAN_READY)
+            return True
+
+        return False
+
+    def _create_snapshot_if_needed(self, record: BrainstormRecord, phase_key: str) -> None:
+        """如果当前阶段还没有快照，创建并保存。"""
+        if phase_key not in record.phase_outputs:
+            record.phase_outputs[phase_key] = self.build_phase_snapshot(record, phase_key)
+            self._save(record)
+
+    def _do_advance(self, record: BrainstormRecord) -> str:
+        """实际推进 phase。返回新阶段 key。"""
+        current = record.current_phase
+        now = _now_iso()
+
+        if current == BrainstormPhase.PROACTIVE_ANALYSIS:
+            record.current_phase = BrainstormPhase.PRODUCT_DEF
+
+        elif current == BrainstormPhase.PRODUCT_DEF:
+            record.current_phase = BrainstormPhase.FEATURE_DECOMPOSE
+            root = record.feature_tree.get_node("fn-root")
+            if root and not root.children:
+                self._auto_decompose_product(record)
+
+        elif current == BrainstormPhase.FEATURE_DECOMPOSE:
+            record.current_phase = BrainstormPhase.DELIBERATION_REVIEW
+
+        elif current == BrainstormPhase.DELIBERATION_REVIEW:
+            record.current_phase = BrainstormPhase.RELATIONSHIP
+
+        elif current == BrainstormPhase.RELATIONSHIP:
+            record.current_phase = BrainstormPhase.INDEPENDENT_REVIEW
+
+        elif current == BrainstormPhase.INDEPENDENT_REVIEW:
+            if record.review_result and record.review_result.passed:
+                record.current_phase = BrainstormPhase.REQUIREMENTS_READY
+            else:
+                record.current_phase = BrainstormPhase.CLARIFICATION
+
+        elif current == BrainstormPhase.CLARIFICATION:
+            record.current_phase = BrainstormPhase.INDEPENDENT_REVIEW
+            record.review_result = None
+
+        elif current == BrainstormPhase.REQUIREMENTS_READY:
+            record.current_phase = BrainstormPhase.COMPLETE
+            record.completed_at = now
+
+        elif current == BrainstormPhase.TECHNICAL_ROUTE_DRAFT:
             record.current_phase = BrainstormPhase.TOOL_DISCOVERY
 
         elif current == BrainstormPhase.TOOL_DISCOVERY:
             record.current_phase = BrainstormPhase.EXECUTION_PLAN_READY
+            self._generate_executable_plan(record)
 
         elif current == BrainstormPhase.EXECUTION_PLAN_READY:
             record.current_phase = BrainstormPhase.COMPLETE
             record.completed_at = now
 
         record.phase_history.append({"phase": record.current_phase, "at": now})
+        self._save(record)
+        return record.current_phase
+
+    def confirm_phase(self, record: BrainstormRecord) -> str:
+        """标记当前阶段已确认，推进到下一阶段。"""
+        phase_key = record.current_phase
+        if phase_key in record.phase_outputs:
+            record.phase_outputs[phase_key].confirmed = True
+            record.phase_outputs[phase_key].confirmed_at = _now_iso()
+        new_phase = self._do_advance(record)
+        # 为新阶段创建快照
+        self._create_snapshot_if_needed(record, new_phase)
+        return new_phase
+
+    def rollback_to_phase(self, record: BrainstormRecord, target_phase: str) -> bool:
+        """回退到指定阶段。target_phase 必须是已完成（有快照）的阶段。"""
+        if target_phase not in record.phase_outputs:
+            return False
+        # 标记目标阶段之后的所有阶段为未确认
+        ordered_phases = list(BrainstormPhase)
+        target_idx = None
+        for i, p in enumerate(ordered_phases):
+            if p == target_phase:
+                target_idx = i
+                break
+        if target_idx is None:
+            return False
+        for p in ordered_phases[target_idx + 1:]:
+            if p in record.phase_outputs:
+                record.phase_outputs[p].confirmed = False
+                record.phase_outputs[p].confirmed_at = ""
+        record.current_phase = target_phase
         self._save(record)
         return True
 
@@ -961,8 +1169,9 @@ class BrainstormManager:
         elif phase == BrainstormPhase.REQUIREMENTS_READY:
             self._process_requirements_confirm(record, user_response)
 
-        # 尝试推进 phase
-        self.advance_phase(record)
+        # 检查是否可以推进（守卫通过则自动推进）
+        if self.advance_phase(record):
+            self._do_advance(record)
 
         # 保存
         self._save(record)
@@ -1252,6 +1461,37 @@ class BrainstormManager:
         results = service.discover(record.technical_route.tool_needs)
         record.tool_discovery_results = results
         return results
+
+    def _generate_executable_plan(self, record: BrainstormRecord) -> None:
+        """在 TOOL_DISCOVERY → EXECUTION_PLAN_READY 时自动生成可执行计划。"""
+        from ralph.executable_plan_generator import ExecutablePlanGenerator
+        generator = ExecutablePlanGenerator(self._config)
+        try:
+            plan = generator.generate(record)
+            logger.info(
+                "Generated ExecutablePlan with %d tasks for record %s",
+                len(plan.tasks),
+                record.record_id,
+            )
+        except Exception as e:
+            logger.error("Failed to generate executable plan: %s", e)
+
+    def generate_executable_plan(self, record: BrainstormRecord) -> ExecutablePlan | None:
+        """手动触发可执行计划生成（供 API 调用）。"""
+        if record.executable_plan:
+            return record.executable_plan
+        self._generate_executable_plan(record)
+        return record.executable_plan
+
+    def render_executable_plan_markdown(self, record: BrainstormRecord) -> str:
+        """渲染可执行计划为 Markdown。"""
+        from ralph.executable_plan_generator import ExecutablePlanGenerator
+        generator = ExecutablePlanGenerator(self._config)
+        if not record.executable_plan:
+            self._generate_executable_plan(record)
+        if record.executable_plan:
+            return generator.to_markdown(record.executable_plan)
+        return ""
 
     # ---- 文档生成 -----------------------------------------------------------
 

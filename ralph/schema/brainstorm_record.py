@@ -1,3 +1,4 @@
+from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -10,10 +11,187 @@ def _now_iso() -> str:
 class BrainstormPhase(str, Enum):  # noqa: SIM103  (StrEnum requires py3.11+)
     PRODUCT_DEF = "product_def"
     FEATURE_DECOMPOSE = "feature_decompose"
+    DELIBERATION_REVIEW = "deliberation_review"
     RELATIONSHIP = "relationship"
     INDEPENDENT_REVIEW = "independent_review"
     CLARIFICATION = "clarification"
     COMPLETE = "complete"
+    # V3 新增
+    PROACTIVE_ANALYSIS = "proactive_analysis"
+    TECHNICAL_ROUTE_DRAFT = "technical_route_draft"
+    TOOL_DISCOVERY = "tool_discovery"
+    REQUIREMENTS_READY = "requirements_ready"
+    EXECUTION_PLAN_READY = "execution_plan_ready"
+
+
+# ── V3: 主动分析 ──
+
+@dataclass
+class EvidenceRef:
+    """外部证据或系统推断的来源追溯。"""
+    source_type: str  # user_quote | github | official_docs | package_registry | web | llm_inference
+    title: str
+    url: str = ""
+    quote_or_summary: str = ""
+    captured_at: str = ""
+    confidence: float = 1.0
+
+
+@dataclass
+class ProactiveAnalysisItem:
+    item_id: str
+    category: str  # product_type | target_user | module | tech_direction | risk | question
+    content: str
+    confidence: float
+    status: str = "pending"  # pending | accepted | rejected | modified
+    user_revision: str = ""
+    source_refs: list[SourceRef] = field(default_factory=list)
+
+
+@dataclass
+class ProactiveAnalysis:
+    analysis_id: str
+    items: list[ProactiveAnalysisItem] = field(default_factory=list)
+    summary: str = ""
+    created_at: str = ""
+    confirmed_at: str = ""
+
+
+# ── V3: 多 Agent 产品定义 ──
+
+@dataclass
+class ProductDefFinding:
+    """单个 Agent 维度的分析发现"""
+    finding_id: str
+    dimension: str  # product_vision | user_experience | technical_feasibility | business_value
+    dimension_name: str  # 展示用名称
+    content: str  # 分析内容
+    suggestions: list[str] = field(default_factory=list)  # 建议
+    questions: list[str] = field(default_factory=list)  # 待用户确认的问题
+    confidence: float = 0.8
+    status: str = "pending"  # pending | accepted | rejected | modified
+    user_revision: str = ""
+
+    pm_decision: str = "pending"  # pending | accept | reject | defer
+    pm_reason: str = ""
+
+
+@dataclass
+class ProductDefRound:
+    """一轮多 Agent 产品分析"""
+    round_id: str
+    findings: list[ProductDefFinding] = field(default_factory=list)
+    summary: str = ""
+    created_at: str = ""
+    confirmed_at: str = ""
+
+
+@dataclass
+class ProductDefProgress:
+    """多 Agent 产品定义分析的实时进度"""
+    total_dimensions: int = 4
+    dimensions_analyzed: list[str] = field(default_factory=list)
+    current_dimension: str | None = None
+    partial_findings: list[ProductDefFinding] = field(default_factory=list)
+    started_at: str = ""
+    completed_at: str | None = None
+
+
+@dataclass
+class PhaseOutputSnapshot:
+    """单个阶段完成时的产出快照。"""
+    phase: str  # phase key
+    label: str  # 显示名称
+    completed_at: str
+    confirmed: bool = False
+    confirmed_at: str = ""
+    summary: str = ""
+    detail: dict = field(default_factory=dict)
+
+
+# ── V3: 结构化审查 ──
+
+@dataclass
+class DeliberationFinding:
+    finding_id: str
+    dimension: str
+    affected_feature_ids: list[str]
+    finding: str
+    severity: str  # low | medium | high
+    suggested_change: str
+    evidence: str = ""
+    pm_decision: str = "pending"  # pending | accept | reject | defer
+    pm_reason: str = ""
+
+
+@dataclass
+class DeliberationRound:
+    round_id: str
+    findings: list[DeliberationFinding] = field(default_factory=list)
+    pm_summary: str = ""
+    created_at: str = ""
+    completed_at: str = ""
+
+
+# ── V3: 技术路线 ──
+
+@dataclass
+class TechnicalRoute:
+    route_id: str
+    architecture_summary: str
+    frontend_stack: list[str] = field(default_factory=list)
+    backend_stack: list[str] = field(default_factory=list)
+    data_storage: list[str] = field(default_factory=list)
+    integrations: list[str] = field(default_factory=list)
+    non_functional_requirements: list[str] = field(default_factory=list)
+    key_risks: list[str] = field(default_factory=list)
+    tool_needs: list[str] = field(default_factory=list)
+    status: str = "pending"  # pending | accepted | revision_requested
+    user_feedback: str = ""
+    created_at: str = ""
+    confirmed_at: str = ""
+
+
+# ── V3: 工具发现 ──
+
+@dataclass
+class ToolCandidate:
+    candidate_id: str
+    name: str
+    source: str  # github | web | docs
+    url: str
+    description: str
+    license: str = ""
+    stars: int | None = None
+    last_updated: str = ""
+    package_name: str = ""
+    evidence_urls: list[str] = field(default_factory=list)
+    evidence_snapshot: str = ""
+    evidence_refs: list[EvidenceRef] = field(default_factory=list)
+
+
+@dataclass
+class ToolEvaluation:
+    candidate_id: str
+    functional_fit: int       # 1-5
+    maintenance_health: int   # 1-5
+    license_fit: int          # 1-5
+    stack_compatibility: int  # 1-5
+    security_risk: str        # low | medium | high | unknown
+    integration_cost: str     # low | medium | high
+    summary: str
+    recommendation: str       # adopt | compare | avoid
+
+
+@dataclass
+class ToolDiscoveryResult:
+    discovery_id: str
+    tool_need: str
+    queries: list[str] = field(default_factory=list)
+    candidates: list[ToolCandidate] = field(default_factory=list)
+    evaluations: list[ToolEvaluation] = field(default_factory=list)
+    selected_candidate_ids: list[str] = field(default_factory=list)
+    created_at: str = ""
 
 
 # ── V2 追溯与检查模型 ──
@@ -169,6 +347,63 @@ class ReviewResult:
     reviewed_at: str = ""
 
 
+# ── V3: 可执行计划 ──
+
+@dataclass
+class ExecutionTask:
+    """从 BrainstormRecord 功能树生成的可执行任务"""
+    task_id: str
+    title: str
+    description: str
+    source_feature_id: str  # 来自哪个 FeatureNode
+    action: str  # CREATE | UPDATE | DELETE
+    target_files: list[str] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)  # task_id 列表
+    acceptance_criteria: list[str] = field(default_factory=list)
+    validation_commands: list[str] = field(default_factory=list)  # 如 "pytest tests/test_x.py"
+    estimated_complexity: str = "medium"  # low | medium | high
+    status: str = "pending"  # pending | in_progress | completed | blocked
+
+
+@dataclass
+class ExecutablePlan:
+    """从 BrainstormRecord 生成的可执行计划（Archon plan.md 的结构化版本）"""
+    plan_id: str
+    project_name: str
+    summary: str = ""
+    user_story: str = ""
+    problem_statement: str = ""
+    solution_statement: str = ""
+
+    # 元数据
+    plan_type: str = ""  # feature | bugfix | refactor | new_project
+    complexity: str = ""  # small | medium | large
+    systems_affected: list[str] = field(default_factory=list)
+
+    # 技术上下文
+    architecture_summary: str = ""
+    tech_stack: list[str] = field(default_factory=list)
+    tool_needs: list[str] = field(default_factory=list)
+
+    # 关键文件
+    mandatory_reading: list[str] = field(default_factory=list)  # 实现者必须读的文件
+    patterns_to_mirror: list[str] = field(default_factory=list)  # 代码库中可参考的模式
+
+    # 任务列表（按依赖排序）
+    tasks: list[ExecutionTask] = field(default_factory=list)
+
+    # 验证
+    testing_strategy: str = ""
+    validation_commands: list[str] = field(default_factory=list)
+    acceptance_criteria: list[str] = field(default_factory=list)
+
+    # 风险
+    risks: list[str] = field(default_factory=list)
+
+    created_at: str = ""
+    brainstorm_record_id: str = ""
+
+
 @dataclass
 class TaskHandoffHint:
     hint_id: str
@@ -213,12 +448,28 @@ class BrainstormRecord:
     # Phase 状态机
     current_phase: str = "product_def"
     phase_history: list[dict] = field(default_factory=list)
+    phase_outputs: dict[str, PhaseOutputSnapshot] = field(default_factory=dict)
 
     # V2 核心数据结构
     feature_tree: FeatureTree = field(default_factory=FeatureTree)
     relationship_graph: RelationshipGraph = field(default_factory=RelationshipGraph)
     review_result: ReviewResult | None = None
     task_handoff_hints: list[TaskHandoffHint] = field(default_factory=list)
+
+    # V3: 多 Agent 产品定义
+    product_def_rounds: list[ProductDefRound] = field(default_factory=list)
+    product_def_progress: ProductDefProgress | None = None
+    # V3: 主动分析
+    proactive_analysis: ProactiveAnalysis | None = None
+    # V3: 多轮审查
+    deliberation_rounds: list[DeliberationRound] = field(default_factory=list)
+    # V3: 技术路线
+    technical_route: TechnicalRoute | None = None
+    technical_route_history: list[TechnicalRoute] = field(default_factory=list)
+    # V3: 工具发现
+    tool_discovery_results: list[ToolDiscoveryResult] = field(default_factory=list)
+    # V3: 可执行计划
+    executable_plan: ExecutablePlan | None = None
 
     # V1 兼容字段
     round_number: int = 0
@@ -417,6 +668,9 @@ def dict_to_brainstorm(data: dict) -> BrainstormRecord:
     def build_source_refs(refs) -> list[SourceRef]:
         return [SourceRef(**r) for r in refs] if refs else []
 
+    def build_evidence_refs(refs) -> list[EvidenceRef]:
+        return [EvidenceRef(**r) for r in refs] if refs else []
+
     def build_explicit_checks(checks) -> dict[str, ExplicitCheck]:
         result: dict[str, ExplicitCheck] = {}
         for k, v in (checks or {}).items():
@@ -436,6 +690,117 @@ def dict_to_brainstorm(data: dict) -> BrainstormRecord:
                 source_refs=build_source_refs(ndata.get("source_refs")),
             )
         return result
+
+    # ── V3 辅助函数 ──
+
+    def build_proactive_items(items_data) -> list[ProactiveAnalysisItem]:
+        return [
+            ProactiveAnalysisItem(
+                **{k: v for k, v in item.items() if k != "source_refs"},
+                source_refs=build_source_refs(item.get("source_refs", [])),
+            )
+            for item in (items_data or [])
+        ]
+
+    def build_proactive_analysis(pa_data) -> ProactiveAnalysis | None:
+        if not pa_data:
+            return None
+        return ProactiveAnalysis(
+            analysis_id=pa_data["analysis_id"],
+            items=build_proactive_items(pa_data.get("items", [])),
+            summary=pa_data.get("summary", ""),
+            created_at=pa_data.get("created_at", ""),
+            confirmed_at=pa_data.get("confirmed_at", ""),
+        )
+
+    def build_deliberation_findings(findings_data) -> list[DeliberationFinding]:
+        return [DeliberationFinding(**f) for f in (findings_data or [])]
+
+    def build_deliberation_round(round_data) -> DeliberationRound:
+        return DeliberationRound(
+            round_id=round_data["round_id"],
+            findings=build_deliberation_findings(round_data.get("findings", [])),
+            pm_summary=round_data.get("pm_summary", ""),
+            created_at=round_data.get("created_at", ""),
+            completed_at=round_data.get("completed_at", ""),
+        )
+
+    def build_technical_route(tr_data) -> TechnicalRoute | None:
+        if not tr_data:
+            return None
+        return TechnicalRoute(**tr_data)
+
+    def build_tool_candidates(tc_data) -> list[ToolCandidate]:
+        result: list[ToolCandidate] = []
+        for candidate in (tc_data or []):
+            result.append(ToolCandidate(
+                **{k: v for k, v in candidate.items() if k != "evidence_refs"},
+                evidence_refs=build_evidence_refs(candidate.get("evidence_refs", [])),
+            ))
+        return result
+
+    def build_tool_evaluations(te_data) -> list[ToolEvaluation]:
+        return [ToolEvaluation(**e) for e in (te_data or [])]
+
+    def build_tool_discovery(td_data) -> ToolDiscoveryResult:
+        return ToolDiscoveryResult(
+            discovery_id=td_data["discovery_id"],
+            tool_need=td_data["tool_need"],
+            queries=td_data.get("queries", []),
+            candidates=build_tool_candidates(td_data.get("candidates", [])),
+            evaluations=build_tool_evaluations(td_data.get("evaluations", [])),
+            selected_candidate_ids=td_data.get("selected_candidate_ids", []),
+            created_at=td_data.get("created_at", ""),
+        )
+
+    def build_product_def_finding(f_data) -> ProductDefFinding:
+        return ProductDefFinding(**f_data)
+
+    def build_product_def_round(r_data) -> ProductDefRound:
+        return ProductDefRound(
+            round_id=r_data["round_id"],
+            findings=[build_product_def_finding(f) for f in r_data.get("findings", [])],
+            summary=r_data.get("summary", ""),
+            created_at=r_data.get("created_at", ""),
+            confirmed_at=r_data.get("confirmed_at", ""),
+        )
+
+    def build_product_def_progress(p_data) -> ProductDefProgress | None:
+        if not p_data:
+            return None
+        return ProductDefProgress(
+            total_dimensions=p_data.get("total_dimensions", 4),
+            dimensions_analyzed=p_data.get("dimensions_analyzed", []),
+            current_dimension=p_data.get("current_dimension"),
+            partial_findings=[build_product_def_finding(f) for f in p_data.get("partial_findings", [])],
+            started_at=p_data.get("started_at", ""),
+            completed_at=p_data.get("completed_at"),
+        )
+
+    def build_phase_output_snapshot(s_data) -> PhaseOutputSnapshot:
+        return PhaseOutputSnapshot(
+            phase=s_data["phase"],
+            label=s_data["label"],
+            completed_at=s_data["completed_at"],
+            confirmed=s_data.get("confirmed", False),
+            confirmed_at=s_data.get("confirmed_at", ""),
+            summary=s_data.get("summary", ""),
+            detail=s_data.get("detail", {}),
+        )
+
+    def build_execution_task(et_data) -> ExecutionTask:
+        return ExecutionTask(**{k: v for k, v in et_data.items()})
+
+    def build_executable_plan(ep_data) -> ExecutablePlan | None:
+        if not ep_data:
+            return None
+        tasks = [build_execution_task(t) for t in ep_data.get("tasks", [])]
+        return ExecutablePlan(
+            **{k: v for k, v in ep_data.items() if k != "tasks"},
+            tasks=tasks,
+        )
+
+    # ── 构建现有 V2 字段 ──
 
     ft_data = data.get("feature_tree", {})
     feature_tree = FeatureTree(
@@ -472,10 +837,22 @@ def dict_to_brainstorm(data: dict) -> BrainstormRecord:
         schema_version=data.get("schema_version", "v2"),
         current_phase=data.get("current_phase", "product_def"),
         phase_history=data.get("phase_history", []),
+        phase_outputs={k: build_phase_output_snapshot(v) for k, v in data.get("phase_outputs", {}).items()},
         feature_tree=feature_tree,
         relationship_graph=relationship_graph,
         review_result=review_result,
         task_handoff_hints=[TaskHandoffHint(**h) for h in data.get("task_handoff_hints", [])],
+        product_def_rounds=[build_product_def_round(r) for r in data.get("product_def_rounds", [])],
+        product_def_progress=build_product_def_progress(data.get("product_def_progress")),
+        proactive_analysis=build_proactive_analysis(data.get("proactive_analysis")),
+        deliberation_rounds=[build_deliberation_round(r) for r in data.get("deliberation_rounds", [])],
+        technical_route=build_technical_route(data.get("technical_route")),
+        technical_route_history=[
+            route for route in (build_technical_route(r) for r in data.get("technical_route_history", []))
+            if route is not None
+        ],
+        tool_discovery_results=[build_tool_discovery(r) for r in data.get("tool_discovery_results", [])],
+        executable_plan=build_executable_plan(data.get("executable_plan")),
         round_number=data.get("round_number", 0),
         user_message=data.get("user_message", ""),
         confirmed_facts=[ConfirmedFact(**f) for f in data.get("confirmed_facts", [])],

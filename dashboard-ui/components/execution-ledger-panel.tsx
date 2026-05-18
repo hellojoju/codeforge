@@ -17,6 +17,25 @@ export function ExecutionLedgerPanel() {
     agentId: agentId || undefined,
     status: status || undefined,
   })
+  const summary = ledger?.summary
+  const executions = useMemo(() => ledger?.executions ?? [], [ledger?.executions])
+  const summaryItems = summary
+    ? [
+        { label: '总执行', value: summary.total_executions, color: 'bg-slate-500' },
+        { label: '完成', value: summary.completed, color: 'bg-green-500' },
+        { label: '失败', value: summary.failed, color: 'bg-red-500' },
+        { label: '阻塞', value: summary.blocked, color: 'bg-orange-500' },
+        { label: '重试', value: summary.retrying, color: 'bg-yellow-500' },
+      ]
+    : []
+  const featureOptions = useMemo(
+    () => Array.from(new Set(executions.map((e) => e.feature_id).filter(Boolean))).sort(),
+    [executions],
+  )
+  const agentOptions = useMemo(
+    () => Array.from(new Set(executions.map((e) => e.agent_id).filter(Boolean))).sort(),
+    [executions],
+  )
 
   if (isLoading) {
     return (
@@ -41,28 +60,6 @@ export function ExecutionLedgerPanel() {
       </Card>
     )
   }
-
-  const summary = ledger?.summary
-  const executions = ledger?.executions ?? []
-  const summaryItems = summary
-    ? [
-        { label: '总执行', value: summary.total_executions, color: 'bg-slate-500' },
-        { label: '完成', value: summary.completed, color: 'bg-green-500' },
-        { label: '失败', value: summary.failed, color: 'bg-red-500' },
-        { label: '阻塞', value: summary.blocked, color: 'bg-orange-500' },
-        { label: '重试', value: summary.retrying, color: 'bg-yellow-500' },
-      ]
-    : []
-
-  const executions = ledger?.executions ?? []
-  const featureOptions = useMemo(
-    () => Array.from(new Set(executions.map((e) => e.feature_id).filter(Boolean))).sort(),
-    [executions],
-  )
-  const agentOptions = useMemo(
-    () => Array.from(new Set(executions.map((e) => e.agent_id).filter(Boolean))).sort(),
-    [executions],
-  )
 
   return (
     <Card>

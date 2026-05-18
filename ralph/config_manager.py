@@ -253,6 +253,21 @@ class RalphConfigManager:
         self._write_json("toolchain.json", config)
         return config
 
+    # --- Search Providers ---
+
+    def get_search_providers(self) -> dict:
+        return self._read_json("search-providers.json", {
+            "enabled": False,
+            "providers": [],
+            "cache_ttl_seconds": 86400,
+            "timeout_seconds": 10,
+            "rate_limit_per_minute": 30,
+        })
+
+    def save_search_providers(self, config: dict) -> dict:
+        self._write_json("search-providers.json", config)
+        return config
+
     # --- Issue Policy ---
 
     def get_issue_policy(self) -> dict:

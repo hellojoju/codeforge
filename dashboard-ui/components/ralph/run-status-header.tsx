@@ -7,12 +7,20 @@
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { statusColor, statusLabel } from "@/lib/ralph-utils"
-import type { RunStatus } from "@/lib/ralph-types"
 import { RefreshCw } from "lucide-react"
+
+interface HeaderRunStatus {
+  running: number
+  needs_review: number
+  blocked: number
+  accepted: number
+  failed: number
+  next_action: string | null
+}
 
 interface RunStatusHeaderProps {
   connected: boolean
-  runStatus: RunStatus | null
+  runStatus: HeaderRunStatus | null
   loading: boolean
   onRefresh: () => void
   className?: string
@@ -61,7 +69,7 @@ function StatusCountItem({
 /**
  * 状态计数列表
  */
-function StatusCounts({ runStatus }: { runStatus: RunStatus | null }) {
+function StatusCounts({ runStatus }: { runStatus: HeaderRunStatus | null }) {
   if (!runStatus) {
     return (
       <div className="flex items-center gap-4 text-sm text-muted-foreground">

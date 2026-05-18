@@ -20,17 +20,40 @@ import RelationshipGraph from '@/components/ralph/brainstorm/RelationshipGraph';
 import SpecPreview from '@/components/ralph/brainstorm/SpecPreview';
 import TaskHandoffPanel from '@/components/ralph/brainstorm/TaskHandoffPanel';
 import ProactiveAnalysisPanel from '@/components/ralph/brainstorm/ProactiveAnalysisPanel';
+import ProductDefPanel from '@/components/ralph/brainstorm/ProductDefPanel';
 import DeliberationFindingsPanel from '@/components/ralph/brainstorm/DeliberationFindingsPanel';
+import PhaseConfirmationCard from '@/components/ralph/brainstorm/PhaseConfirmationCard';
+import PhaseHistoryPanel from '@/components/ralph/brainstorm/PhaseHistoryPanel';
 import {
-  resumeSession, getSpecDocument, confirmProactiveAnalysisItem,
+  resumeSession, getSpecDocument, confirmProactiveAnalysisItem, confirmProductDefFinding,
   triggerDeliberation, decideDeliberationFinding, generateTechnicalRoute,
-  confirmTechnicalRoute, triggerToolDiscovery,
+  confirmTechnicalRoute, triggerToolDiscovery, getProductDefProgress,
+  confirmPhaseAdvance, rollbackToPhase,
 } from '@/lib/brainstorm-api';
 
 function formatAssistantContent(questions: string[]): string {
   if (questions.length === 0) return '';
   if (questions.length === 1) return questions[0];
   return questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
+}
+
+const PHASE_LABELS: Record<string, string> = {
+  proactive_analysis: '主动分析',
+  product_def: '产品定义',
+  feature_decompose: '功能分解',
+  deliberation_review: '多维审查',
+  relationship: '关系分析',
+  independent_review: '独立审查',
+  clarification: '需求澄清',
+  requirements_ready: '需求就绪',
+  technical_route_draft: '技术路线',
+  tool_discovery: '工具发现',
+  execution_plan_ready: '执行计划',
+  complete: '完成',
+};
+
+function getPhaseLabel(phase: string): string {
+  return PHASE_LABELS[phase] ?? phase;
 }
 
 interface FeatureTreeNode {
@@ -85,11 +108,18 @@ export default function BrainstormPage() {
   const [specPreview, setSpecPreview] = useState<string>('');
   const [handoffHints, setHandoffHints] = useState<HandoffHint[]>([]);
   const [proactiveAnalysis, setProactiveAnalysis] = useState<Record<string, unknown> | null>(null);
+  const [productDefRounds, setProductDefRounds] = useState<Record<string, unknown>[]>([]);
+  const [productDefProgress, setProductDefProgress] = useState<Record<string, unknown> | null>(null);
   const [deliberationRounds, setDeliberationRounds] = useState<Record<string, unknown>[]>([]);
   const [technicalRoute, setTechnicalRoute] = useState<Record<string, unknown> | null>(null);
   const [toolDiscoveryResults, setToolDiscoveryResults] = useState<Record<string, unknown>[]>([]);
   const [showTree, setShowTree] = useState(true);
+  const [rightPanelTab, setRightPanelTab] = useState<'current' | 'history'>('current');
+  const [phaseOutputs, setPhaseOutputs] = useState<Record<string, Record<string, unknown>>>({});
+  const [phaseReady, setPhaseReady] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const progressPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Conversation history
   interface Message { role: 'user' | 'assistant'; content: string }
@@ -99,10 +129,16 @@ export default function BrainstormPage() {
     try {
       const sessionList = await listBrainstormSessions();
       setSessions(sessionList);
-      // 自动恢复最近一次会话
+      // 自动恢复当前项目的最近一次会话
       if (sessionList.length > 0 && !activeSession) {
-        const latest = sessionList[0];
-        await resumeAndSetSession(latest.record_id as string);
+        const projectFilter = (currentProject as { name?: string })?.name;
+        const currentProjectSessions = projectFilter
+          ? sessionList.filter(s => (s as Record<string, unknown>).project_name === projectFilter)
+          : sessionList;
+        if (currentProjectSessions.length > 0) {
+          const latest = currentProjectSessions[0];
+          await resumeAndSetSession(latest.record_id as string);
+        }
       }
     } catch (e) {
       toast.error('加载失败: ' + (e instanceof Error ? e.message : '未知错误'));
@@ -144,6 +180,9 @@ export default function BrainstormPage() {
     if ('proactive_analysis' in result) {
       setProactiveAnalysis((result.proactive_analysis as Record<string, unknown> | null) || null);
     }
+    if ('product_def_rounds' in result) {
+      setProductDefRounds((result.product_def_rounds as Record<string, unknown>[]) || []);
+    }
     if ('deliberation_rounds' in result) {
       setDeliberationRounds((result.deliberation_rounds as Record<string, unknown>[]) || []);
     }
@@ -152,6 +191,12 @@ export default function BrainstormPage() {
     }
     if ('tool_discovery_results' in result) {
       setToolDiscoveryResults((result.tool_discovery_results as Record<string, unknown>[]) || []);
+    }
+    if ('phase_outputs' in result) {
+      setPhaseOutputs((result.phase_outputs as Record<string, Record<string, unknown>>) || {});
+    }
+    if ('phase_ready' in result) {
+      setPhaseReady(!!result.phase_ready);
     }
   };
 
@@ -198,6 +243,53 @@ export default function BrainstormPage() {
     void initialize();
   }, []);
 
+  // Poll product_def progress while analysis is running
+  useEffect(() => {
+    if (phase !== 'product_def' || !activeSession?.record_id) {
+      if (progressPollRef.current) {
+        clearInterval(progressPollRef.current);
+        progressPollRef.current = null;
+      }
+      return;
+    }
+
+    // If rounds already exist, no need to poll
+    if (productDefRounds.length > 0) {
+      if (progressPollRef.current) {
+        clearInterval(progressPollRef.current);
+        progressPollRef.current = null;
+      }
+      return;
+    }
+
+    const poll = async () => {
+      try {
+        const progress = await getProductDefProgress(activeSession.record_id as string);
+        setProductDefProgress(progress);
+        if (progress.status === 'complete' || progress.completed_at) {
+          // Sync completed rounds via resume
+          await resumeAndSetSession(activeSession.record_id as string);
+          if (progressPollRef.current) {
+            clearInterval(progressPollRef.current);
+            progressPollRef.current = null;
+          }
+        }
+      } catch {
+        // ignore — will retry
+      }
+    };
+
+    poll(); // initial
+    progressPollRef.current = setInterval(poll, 2000);
+
+    return () => {
+      if (progressPollRef.current) {
+        clearInterval(progressPollRef.current);
+        progressPollRef.current = null;
+      }
+    };
+  }, [phase, activeSession?.record_id, productDefRounds.length]);
+
   const handleStart = async () => {
     if (!input || !currentProject) return;
     setLoading(true);
@@ -208,10 +300,14 @@ export default function BrainstormPage() {
       // Refresh session list
       try { setSessions(await listBrainstormSessions()); } catch { /* ignore */ }
       // Add to conversation history
-      setMessages([
+      const startMessages: Message[] = [
         { role: 'user', content: input },
-        { role: 'assistant', content: formatAssistantContent((result.questions as string[]) || []) },
-      ]);
+      ];
+      // product_def 阶段不展示 assistant questions，用 ProductDefPanel 替代
+      if (result.phase !== 'product_def') {
+        startMessages.push({ role: 'assistant', content: formatAssistantContent((result.questions as string[]) || []) });
+      }
+      setMessages(startMessages);
       // V2 state
       if (result.phase) setPhase(result.phase as string);
       setCurrentQuestion(null);
@@ -230,27 +326,40 @@ export default function BrainstormPage() {
     if (!input || !activeSession) return;
     setLoading(true);
     try {
+      const oldPhase = phase;
       const result = await brainstormRespond(activeSession.record_id as string, input);
       setActiveSession(result);
       setInput('');
-      // Append to conversation history
-      setMessages(prev => [
-        ...prev,
-        { role: 'user', content: input },
-        { role: 'assistant', content: formatAssistantContent((result.questions as string[]) || []) },
-      ]);
-      // V2 state updates
-      if (result.phase) setPhase(result.phase as string);
-      setCurrentQuestion((result.current_question as Record<string, unknown> | null) || null);
-      if (result.feature_tree) setFeatureTree(result.feature_tree as Record<string, unknown>);
-      if (result.active_node) {
-        const nodes = (result.feature_tree as Record<string, unknown>)?.nodes as Record<string, BrainstormFeatureNode>;
-        if (nodes?.[result.active_node as string]) setActiveNode(nodes[result.active_node as string]);
+
+      const newPhase = (result.phase as string) || oldPhase;
+      if (newPhase !== oldPhase) {
+        // Phase changed — reload full session to get proper state for new phase
+        setPhase(newPhase);
+        await resumeAndSetSession(activeSession.record_id as string);
+        toast.success(`已进入${getPhaseLabel(newPhase)}阶段`);
+      } else {
+        // Same phase — just append messages
+        // product_def 阶段不展示 assistant questions，用 ProductDefPanel 替代
+        const newMessages: Message[] = [
+          { role: 'user', content: input },
+        ];
+        if (newPhase !== 'product_def') {
+          newMessages.push({ role: 'assistant', content: formatAssistantContent((result.questions as string[]) || []) });
+        }
+        setMessages(prev => [...prev, ...newMessages]);
+        // V2 state updates
+        setCurrentQuestion((result.current_question as Record<string, unknown> | null) || null);
+        if (result.feature_tree) setFeatureTree(result.feature_tree as Record<string, unknown>);
+        if (result.active_node) {
+          const nodes = (result.feature_tree as Record<string, unknown>)?.nodes as Record<string, BrainstormFeatureNode>;
+          if (nodes?.[result.active_node as string]) setActiveNode(nodes[result.active_node as string]);
+        }
+        if (result.granularity_status) setGranularityMissing(result.granularity_status as string[]);
+        if (result.spec_preview) setSpecPreview(result.spec_preview as string);
+        if (result.handoff_hints) setHandoffHints(result.handoff_hints as HandoffHint[]);
+        syncV3State(result);
       }
-      if (result.granularity_status) setGranularityMissing(result.granularity_status as string[]);
-      if (result.spec_preview) setSpecPreview(result.spec_preview as string);
-      if (result.handoff_hints) setHandoffHints(result.handoff_hints as HandoffHint[]);
-      syncV3State(result);
+
       if (result.is_complete) {
         toast.success('需求共创完成！');
         await load();
@@ -316,6 +425,38 @@ export default function BrainstormPage() {
       toast.error('请先确认技术路线');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleConfirmPhase = async () => {
+    if (!activeSession?.record_id) return;
+    setConfirming(true);
+    try {
+      const result = await confirmPhaseAdvance(activeSession.record_id as string);
+      if (result.success) {
+        await resumeAndSetSession(activeSession.record_id as string);
+        setPhaseReady(false);
+        toast.success(`已进入${getPhaseLabel(result.phase as string)}阶段`);
+      }
+    } catch {
+      toast.error('确认失败');
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  const handleRollbackToPhase = async (targetPhase: string) => {
+    if (!activeSession?.record_id) return;
+    try {
+      const result = await rollbackToPhase(activeSession.record_id as string, targetPhase);
+      if (result.success) {
+        await resumeAndSetSession(activeSession.record_id as string);
+        setPhaseReady(false);
+        setRightPanelTab('current');
+        toast.success(`已回退到${getPhaseLabel(targetPhase)}阶段`);
+      }
+    } catch {
+      toast.error('回退失败');
     }
   };
 
@@ -395,6 +536,8 @@ export default function BrainstormPage() {
                 {messages.map((msg, i) => {
                   // 在 PROACTIVE_ANALYSIS phase 时，跳过 assistant 的旧格式回复（用 ProactiveAnalysisPanel 替代）
                   if (phase === 'proactive_analysis' && msg.role === 'assistant') return null;
+                  // 在 PRODUCT_DEF phase 时，跳过 assistant 的旧格式回复（用 ProductDefPanel 替代）
+                  if (phase === 'product_def' && msg.role === 'assistant') return null;
                   return (
                     <div key={i} className={`flex items-start gap-2 p-3 rounded-xl text-sm ${
                       msg.role === 'user'
@@ -420,12 +563,57 @@ export default function BrainstormPage() {
                       try {
                         const result = await confirmProactiveAnalysisItem(activeSession.record_id as string, itemId, status as 'accepted' | 'rejected' | 'modified', revision);
                         setProactiveAnalysis((result.proactive_analysis as Record<string, unknown> | null) || null);
-                        if (result.current_phase) setPhase(result.current_phase as string);
-                        toast.success('已更新假设状态');
+                        const newPhase = (result.current_phase as string) || phase;
+                        if (newPhase !== phase) {
+                          // Phase 推进了，刷新整个 session 以获取下一阶段的问题
+                          setPhase(newPhase);
+                          await resumeAndSetSession(activeSession.record_id as string);
+                          toast.success(`已确认，进入${getPhaseLabel(newPhase)}阶段`);
+                        } else {
+                          toast.success('已更新');
+                        }
                       } catch {
-                        toast.error('更新假设失败');
+                        toast.error('更新失败');
                       }
                     }}
+                  />
+                )}
+
+                {/* PRODUCT_DEF phase: 多 Agent 分析结果在主聊天区展示 */}
+                {phase === 'product_def' && (productDefRounds.length > 0 || productDefProgress) && (
+                  <ProductDefPanel
+                    rounds={productDefRounds as any}
+                    loadingProgress={productDefProgress as unknown as import('@/lib/ralph-types').ProductDefProgress | undefined}
+                    onConfirm={async (findingId, decision, reason, revision) => {
+                      if (!activeSession?.record_id) return;
+                      try {
+                        await confirmProductDefFinding(activeSession.record_id as string, findingId, decision, reason || '', revision || '');
+                        setProductDefRounds(prev => prev.map((round) => ({
+                          ...round,
+                          findings: ((round.findings as Record<string, unknown>[] | undefined) || []).map((finding) => {
+                            const f = finding as Record<string, unknown>;
+                            if (f.finding_id === findingId) {
+                              return { ...f, pm_decision: decision, user_revision: revision || '', status: decision === 'accept' ? 'accepted' : decision === 'reject' ? 'rejected' : 'modified' };
+                            }
+                            return finding;
+                          }),
+                        })));
+                        toast.success('已确认分析结果');
+                      } catch {
+                        toast.error('确认失败');
+                      }
+                    }}
+                  />
+                )}
+
+                {/* Phase ready for confirmation */}
+                {phaseReady && phaseOutputs[phase] && (
+                  <PhaseConfirmationCard
+                    phaseLabel={getPhaseLabel(phase)}
+                    summary={(phaseOutputs[phase] as Record<string, unknown>).summary as string || ''}
+                    onConfirm={handleConfirmPhase}
+                    onRollback={() => setRightPanelTab('history')}
+                    loading={confirming}
                   />
                 )}
 
@@ -455,7 +643,65 @@ export default function BrainstormPage() {
 
         {/* Right Panel */}
         {activeSession && (
-          <div className="w-80 shrink-0 border-l border-slate-200 overflow-y-auto p-4 space-y-4 bg-white">
+          <div className="w-80 shrink-0 border-l border-slate-200 overflow-y-auto bg-white">
+            {/* Tab switcher */}
+            <div className="flex border-b border-slate-200">
+              <button
+                className={cn(
+                  'flex-1 py-2 text-xs font-medium transition-colors',
+                  rightPanelTab === 'current'
+                    ? 'text-blue-600 border-b-2 border-blue-600'
+                    : 'text-slate-400 hover:text-slate-600',
+                )}
+                onClick={() => setRightPanelTab('current')}
+              >
+                当前阶段
+              </button>
+              <button
+                className={cn(
+                  'flex-1 py-2 text-xs font-medium transition-colors',
+                  rightPanelTab === 'history'
+                    ? 'text-blue-600 border-b-2 border-blue-600'
+                    : 'text-slate-400 hover:text-slate-600',
+                )}
+                onClick={() => setRightPanelTab('history')}
+              >
+                阶段历史
+              </button>
+            </div>
+
+            {/* Tab content */}
+            <div className="p-4 space-y-4">
+              {rightPanelTab === 'history' ? (
+                <PhaseHistoryPanel
+                  phaseOutputs={phaseOutputs as unknown as Record<string, import('@/lib/ralph-types').PhaseOutputSnapshot>}
+                  currentPhase={phase}
+                  onRollback={handleRollbackToPhase}
+                />
+              ) : (
+                <>
+            {/* 主动分析回顾 — 已完成阶段可查看产出物 */}
+            {proactiveAnalysis && (phaseOutputs.proactive_analysis || phase !== 'proactive_analysis') && (
+              <div className="rounded border border-slate-200 p-3">
+                <h3 className="text-xs font-semibold text-slate-500 uppercase mb-2">主动分析结果</h3>
+                <ProactiveAnalysisPanel
+                  analysis={proactiveAnalysis as unknown as import('@/lib/ralph-types').ProactiveAnalysis}
+                  onConfirm={() => {}}
+                />
+              </div>
+            )}
+
+            {/* 产品定义回顾 — 已完成阶段可查看多Agent分析结果 */}
+            {(productDefRounds.length > 0) && (phaseOutputs.product_def || phase !== 'product_def') && (
+              <div className="rounded border border-slate-200 p-3">
+                <h3 className="text-xs font-semibold text-slate-500 uppercase mb-2">产品定义分析</h3>
+                <ProductDefPanel
+                  rounds={productDefRounds as any}
+                  onConfirm={async () => { toast.info('该阶段已完成，无法修改'); }}
+                />
+              </div>
+            )}
+
             {activeNode && <NodeDetailCard node={activeNode} />}
             {granularityMissing.length > 0 && <GranularityBadge missingItems={granularityMissing} />}
 
@@ -601,6 +847,9 @@ export default function BrainstormPage() {
                    <p className="text-[10px] text-slate-400">{s.round_number as number} 轮</p>
                  </button>
                ))}
+            </div>
+                </>
+              )}
             </div>
           </div>
         )}

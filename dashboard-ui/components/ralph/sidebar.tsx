@@ -84,8 +84,10 @@ export function Sidebar({ className }: SidebarProps) {
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set(['advanced']));
   const { pendingActions, currentProject, recentProjects, setCurrentProject } = useRalphStore();
   const [showProjectList, setShowProjectList] = useState(false);
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    setMounted(true);
     const stored = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
     if (stored) setCollapsed(stored === 'true');
   }, []);
@@ -279,8 +281,9 @@ export function Sidebar({ className }: SidebarProps) {
       </nav>
 
       {/* Footer — Project switcher */}
-      <div className="border-t border-slate-200/70 p-3">
-        {currentProject ? (
+      {mounted && (
+        <div className="border-t border-slate-200/70 p-3">
+          {currentProject ? (
           <div className="relative">
             <button
               onClick={(e) => { e.stopPropagation(); !collapsed && setShowProjectList(!showProjectList); }}
@@ -336,7 +339,8 @@ export function Sidebar({ className }: SidebarProps) {
             {!collapsed && <span>新建/打开项目</span>}
           </button>
         )}
-      </div>
+        </div>
+      )}
     </aside>
   );
 }

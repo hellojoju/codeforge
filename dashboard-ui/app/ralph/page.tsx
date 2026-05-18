@@ -19,18 +19,28 @@ const ORDERED_STATUSES: WorkUnitStatus[] = ['running', 'needs_review', 'accepted
 /** 将 RunStatus API 响应映射为 RunStatusHeader 期望的扁平结构 */
 function adaptRunStatus(rs: RunStatus | null) {
   if (!rs) return null;
-  const { status_counts: counts } = rs;
+  if (rs.status_counts) {
+    const { status_counts: counts } = rs;
+    return {
+      running: counts.running ?? 0,
+      needs_review: counts.needs_review ?? 0,
+      blocked: counts.blocked ?? 0,
+      accepted: counts.accepted ?? 0,
+      failed: counts.failed ?? 0,
+      next_action: (rs.unresolved_blockers ?? 0) > 0
+        ? `还有 ${rs.unresolved_blockers} 个阻塞项需要关注`
+        : (rs.success_rate_percent ?? 100) < 80
+          ? `成功率偏低 (${rs.success_rate_percent}%) — 建议检查失败任务`
+          : null,
+    };
+  }
   return {
-    running: counts.running ?? 0,
-    needs_review: counts.needs_review ?? 0,
-    blocked: counts.blocked ?? 0,
-    accepted: counts.accepted ?? 0,
-    failed: counts.failed ?? 0,
-    next_action: rs.unresolved_blockers > 0
-      ? `还有 ${rs.unresolved_blockers} 个阻塞项需要关注`
-      : rs.success_rate_percent < 80
-        ? `成功率偏低 (${rs.success_rate_percent}%) — 建议检查失败任务`
-        : null,
+    running: rs.running ?? 0,
+    needs_review: rs.needs_review ?? 0,
+    blocked: rs.blocked ?? 0,
+    accepted: rs.accepted ?? 0,
+    failed: rs.failed ?? 0,
+    next_action: rs.next_action ?? null,
   };
 }
 
@@ -314,7 +324,7 @@ export default function RalphPage() {
       <div className="mb-4">
         <RunStatusHeader
           connected={connected}
-          runStatus={adaptRunStatus(runStatus) as RunStatus}
+          runStatus={adaptRunStatus(runStatus)}
           loading={loading}
           onRefresh={handleRefresh}
         />

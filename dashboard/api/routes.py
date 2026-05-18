@@ -1937,10 +1937,17 @@ def create_dashboard_app(
             body.get("project_name", "Unnamed"),
             body.get("user_message", ""),
         )
-        # V2: 走 explore_product 路径，_render_question_with_llm 会调用 LLM
-        questions = mgr.explore_product(record)
-        if not questions:
-            questions = mgr.generate_questions(record, use_llm=True)
+        # V3: product_def 阶段使用多 Agent 分析，不返回 questions
+        questions = []
+        phase_val = record.current_phase.value if hasattr(record.current_phase, "value") else str(record.current_phase)
+        if phase_val == "product_def":
+            # 触发多 Agent 分析，但不返回问题列表
+            mgr.explore_product(record)
+            questions = []
+        else:
+            questions = mgr.explore_product(record)
+            if not questions:
+                questions = mgr.generate_questions(record, use_llm=True)
         mgr._save(record)  # 持久化 question_plan 状态
         summary = mgr.get_summary(record)
         from ralph.schema.brainstorm_record import brainstorm_to_dict
@@ -1952,9 +1959,11 @@ def create_dashboard_app(
             "feature_tree": brainstorm_to_dict(record.feature_tree),
             "active_node": record.feature_tree.current_exploring_id,
             "proactive_analysis": brainstorm_to_dict(record.proactive_analysis) if record.proactive_analysis else None,
+            "product_def_rounds": [brainstorm_to_dict(r) for r in record.product_def_rounds],
             "deliberation_rounds": [brainstorm_to_dict(r) for r in record.deliberation_rounds],
             "technical_route": brainstorm_to_dict(record.technical_route) if record.technical_route else None,
             "tool_discovery_results": [brainstorm_to_dict(r) for r in record.tool_discovery_results],
+            "executable_plan": brainstorm_to_dict(record.executable_plan) if record.executable_plan else None,
         }
 
     @app.post("/api/ralph/brainstorm/respond")
@@ -1969,10 +1978,26 @@ def create_dashboard_app(
         # V2: 走 process_response_v2 路径
         updated = mgr.process_response_v2(record, body.get("user_response", ""),
                                           body.get("extracted_facts"))
-        # 根据当前 phase 生成问题
+        # 根据当前 phase 生成问题 — product_def 阶段不返回 questions，让前端展示多 Agent 分析面板
         phase_val = updated.current_phase.value if hasattr(updated.current_phase, "value") else str(updated.current_phase)
         if phase_val == "product_def":
-            questions = mgr.explore_product(updated)
+            questions = []
+            # 确保多 Agent 分析已执行（advance_phase 已在 process_response_v2 中调用）
+            if not updated.product_def_rounds:
+                mgr.explore_product(updated)
+            # 如果 phase 没推进，检查缺失的产品字段
+            new_phase_val = updated.current_phase.value if hasattr(updated.current_phase, "value") else str(updated.current_phase)
+            if new_phase_val == "product_def":
+                root = updated.feature_tree.get_node("fn-root")
+                if root:
+                    missing_fields = []
+                    for fld in ["vision", "out_of_scope"]:
+                        val = getattr(root, fld, None)
+                        if not val or (isinstance(val, str) and not val.strip()) or (isinstance(val, list) and not val):
+                            missing_fields.append(fld)
+                    if missing_fields:
+                        field_labels = {"vision": "产品愿景", "out_of_scope": "第一版明确不做的内容"}
+                        questions = [f"请补充: {'、'.join(field_labels.get(f, f) for f in missing_fields)}"]
         elif phase_val == "feature_decompose":
             active = mgr.get_active_node(updated)
             if active:
@@ -2022,9 +2047,13 @@ def create_dashboard_app(
             "spec_preview": spec_preview,
             "handoff_hints": handoff_hints,
             "proactive_analysis": brainstorm_to_dict(updated.proactive_analysis) if updated.proactive_analysis else None,
+            "product_def_rounds": [brainstorm_to_dict(r) for r in updated.product_def_rounds],
             "deliberation_rounds": [brainstorm_to_dict(r) for r in updated.deliberation_rounds],
             "technical_route": brainstorm_to_dict(updated.technical_route) if updated.technical_route else None,
             "tool_discovery_results": [brainstorm_to_dict(r) for r in updated.tool_discovery_results],
+            "executable_plan": brainstorm_to_dict(updated.executable_plan) if updated.executable_plan else None,
+            "phase_outputs": {k: brainstorm_to_dict(v) for k, v in updated.phase_outputs.items()},
+            "phase_ready": mgr.advance_phase(updated),
         }
 
     # --- Ralph API: Brainstorm V2 端点 ---
@@ -2054,10 +2083,12 @@ def create_dashboard_app(
             raise HTTPException(status_code=404, detail="Record not found")
         from ralph.schema.brainstorm_record import brainstorm_to_dict
 
-        # 恢复当前待回答问题
+        # product_def 阶段不返回 questions，由前端 ProductDefPanel 展示多 Agent 分析结果
         phase_val = record.current_phase.value if hasattr(record.current_phase, 'value') else str(record.current_phase)
+        questions = []
         if phase_val == "product_def":
-            questions = mgr.explore_product(record)
+            mgr.explore_product(record)
+            mgr._save(record)  # 保存多 Agent 分析结果到磁盘
         else:
             questions = mgr.generate_questions(record, use_llm=True)
         if not questions:
@@ -2071,10 +2102,58 @@ def create_dashboard_app(
             "active_node": record.feature_tree.current_exploring_id,
             "conversation_history": mgr.get_conversation_history(record),
             "proactive_analysis": brainstorm_to_dict(record.proactive_analysis) if record.proactive_analysis else None,
+            "product_def_rounds": [brainstorm_to_dict(r) for r in record.product_def_rounds],
             "deliberation_rounds": [brainstorm_to_dict(r) for r in record.deliberation_rounds],
             "technical_route": brainstorm_to_dict(record.technical_route) if record.technical_route else None,
             "tool_discovery_results": [brainstorm_to_dict(r) for r in record.tool_discovery_results],
+            "phase_outputs": {k: brainstorm_to_dict(v) for k, v in record.phase_outputs.items()},
+            "phase_ready": mgr.advance_phase(record),
         }
+
+    @app.get("/api/ralph/brainstorm/{record_id}/product-def/progress")
+    async def ralph_get_product_def_progress(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        progress = mgr.get_product_def_progress(record_id)
+        if not progress:
+            return {"status": "idle", "dimensions_analyzed": [], "total_dimensions": 4}
+        return {
+            "status": "complete" if progress.get("completed_at") else "running",
+            **progress,
+        }
+
+    @app.post("/api/ralph/brainstorm/{record_id}/phase/confirm")
+    async def ralph_confirm_phase(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        new_phase = mgr.confirm_phase(record)
+        return {"success": True, "phase": new_phase}
+
+    @app.post("/api/ralph/brainstorm/{record_id}/phase/rollback")
+    async def ralph_rollback_phase(body: dict[str, Any]) -> dict:
+        record_id = body.get("record_id", "")
+        target_phase = body.get("target_phase", "")
+        if not record_id or not target_phase:
+            raise HTTPException(status_code=422, detail="record_id and target_phase required")
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        success = mgr.rollback_to_phase(record, target_phase)
+        return {"success": success, "phase": record.current_phase}
+
+    @app.get("/api/ralph/brainstorm/{record_id}/phase-outputs")
+    async def ralph_get_phase_outputs(record_id: str) -> dict:
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        result = {}
+        for key, snap in record.phase_outputs.items():
+            result[key] = brainstorm_to_dict(snap)
+        return result
 
     @app.post("/api/ralph/brainstorm/{record_id}/advance")
     async def ralph_advance_phase(record_id: str) -> dict:
@@ -2472,6 +2551,54 @@ def create_dashboard_app(
         _, record = _find_record_by_technical_route(route_id)
         from ralph.schema.brainstorm_record import brainstorm_to_dict
         return [brainstorm_to_dict(r) for r in record.tool_discovery_results]
+
+    @app.get("/api/ralph/brainstorm/{record_id}/executable-plan")
+    async def ralph_get_executable_plan(record_id: str) -> dict:
+        """获取可执行计划（从 BrainstormRecord 生成的任务分解）。"""
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Brainstorm record not found")
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        plan = mgr.generate_executable_plan(record)
+        if plan:
+            return brainstorm_to_dict(plan)
+        return {"error": "Executable plan not yet available"}
+
+    @app.get("/api/ralph/brainstorm/{record_id}/executable-plan/markdown")
+    async def ralph_get_executable_plan_markdown(record_id: str) -> dict:
+        """获取可执行计划的 Markdown 格式。"""
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Brainstorm record not found")
+        markdown = mgr.render_executable_plan_markdown(record)
+        return {"markdown": markdown}
+
+    @app.post("/api/ralph/brainstorm/{record_id}/product-def/confirm")
+    async def ralph_confirm_product_def_finding(record_id: str, body: dict[str, Any]) -> dict:
+        """确认/拒绝/修改多 Agent 产品分析结果。"""
+        mgr = _get_brainstorm_manager()
+        record = mgr.load(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Brainstorm record not found")
+
+        finding_id = body.get("finding_id", "")
+        decision = body.get("decision", "accept")
+        reason = body.get("reason", "")
+        revision = body.get("revision", "")
+
+        from ralph.product_def_service import ProductDefService
+        service = ProductDefService(mgr._config)
+        service.confirm_finding(record, finding_id, decision, reason, revision)
+        mgr._save(record)
+
+        from ralph.schema.brainstorm_record import brainstorm_to_dict
+        return {
+            "record_id": record.record_id,
+            "phase": str(record.current_phase),
+            "product_def_rounds": [brainstorm_to_dict(r) for r in record.product_def_rounds],
+        }
 
     @app.get("/api/ralph/jobs/{job_id}")
     async def ralph_get_job(job_id: str) -> dict:

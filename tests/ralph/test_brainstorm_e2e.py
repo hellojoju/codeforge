@@ -66,7 +66,7 @@ class TestBrainstormFullFlow:
 
         # Phase 1: 创建 session
         record = mgr.start_session("TestProject", "一个团队协作的待办应用")
-        assert record.current_phase == "product_def"
+        record.current_phase = BrainstormPhase.PRODUCT_DEF
         assert record.feature_tree.get_node("fn-root") is not None
 
         # 填充产品定义
@@ -74,6 +74,8 @@ class TestBrainstormFullFlow:
 
         # 推进 Phase 1 → Phase 2（会触发 auto_decompose，产生 exploring 子节点）
         mgr.advance_phase(record)
+        assert record.current_phase == BrainstormPhase.PRODUCT_DEF
+        mgr.confirm_phase(record)
         assert record.current_phase == BrainstormPhase.FEATURE_DECOMPOSE
 
         # 清除自动拆分的 exploring 节点，改为手动添加 confirmed 节点
@@ -83,8 +85,27 @@ class TestBrainstormFullFlow:
         add_confirmed_feature(record, "fn-001", "任务管理")
         add_confirmed_feature(record, "fn-002", "通知系统")
 
-        # 推进 Phase 2 → Phase 3
-        mgr.advance_phase(record)
+        # 推进 Phase 2 → Phase 3 (DELIBERATION_REVIEW)
+        mgr.confirm_phase(record)
+        assert record.current_phase == BrainstormPhase.DELIBERATION_REVIEW
+
+        # V3: 添加一个已解决的 deliberation round 以通过守卫
+        from ralph.schema.brainstorm_record import DeliberationRound, DeliberationFinding
+        record.deliberation_rounds.append(DeliberationRound(
+            round_id="dr-test",
+            findings=[
+                DeliberationFinding(
+                    finding_id="f1", dimension="feature_completeness_reviewer",
+                    affected_feature_ids=["fn-001", "fn-002"],
+                    finding="无问题", severity="low",
+                    suggested_change="无",
+                    pm_decision="accept",
+                )
+            ],
+        ))
+
+        # 推进 DELIBERATION_REVIEW → RELATIONSHIP
+        mgr.confirm_phase(record)
         assert record.current_phase == BrainstormPhase.RELATIONSHIP
 
         # Phase 3: 关系分析（无 LLM，降级到空图）
@@ -93,15 +114,19 @@ class TestBrainstormFullFlow:
         assert record.relationship_graph.analyzed_at != ""
 
         # 推进 Phase 3 → Phase 4
-        mgr.advance_phase(record)
+        mgr.confirm_phase(record)
         assert record.current_phase == BrainstormPhase.INDEPENDENT_REVIEW
 
         # Phase 4: 独立审查（无 LLM，降级为通过）
         result = analyzer.independent_review(record)
         record.review_result = result
 
-        # 推进 Phase 4 → COMPLETE
-        mgr.advance_phase(record)
+        # 推进 Phase 4 → REQUIREMENTS_READY (V3) → COMPLETE
+        mgr.confirm_phase(record)
+        assert record.current_phase == BrainstormPhase.REQUIREMENTS_READY
+
+        # V3: 从 REQUIREMENTS_READY 推进到 COMPLETE
+        mgr.confirm_phase(record)
         assert record.current_phase == BrainstormPhase.COMPLETE
 
         # 验证 spec document 生成
@@ -119,10 +144,11 @@ class TestBrainstormFullFlow:
         """审查不通过 → CLARIFICATION → 重新审查 → 通过"""
         mgr = make_mgr(tmp_path)
         record = mgr.start_session("TestProject", "简单应用")
+        record.current_phase = BrainstormPhase.PRODUCT_DEF
 
         # Phase 1
         fill_product_def(record)
-        mgr.advance_phase(record)
+        mgr.confirm_phase(record)
         assert record.current_phase == BrainstormPhase.FEATURE_DECOMPOSE
 
         # 清除自动拆分的节点，创建有问题的节点（字段不全但手动设为 confirmed）
@@ -134,13 +160,31 @@ class TestBrainstormFullFlow:
         node.confirmed_at = _now_iso()
         record.feature_tree.add_child("fn-root", node)
 
-        mgr.advance_phase(record)
+        # 推进到 DELIBERATION_REVIEW
+        mgr.confirm_phase(record)
+        assert record.current_phase == BrainstormPhase.DELIBERATION_REVIEW
+
+        # 添加已解决的 deliberation round
+        from ralph.schema.brainstorm_record import DeliberationRound, DeliberationFinding
+        record.deliberation_rounds.append(DeliberationRound(
+            round_id="dr-test",
+            findings=[
+                DeliberationFinding(
+                    finding_id="f1", dimension="feature_completeness_reviewer",
+                    affected_feature_ids=["fn-001"],
+                    finding="无问题", severity="low",
+                    suggested_change="无",
+                    pm_decision="accept",
+                )
+            ],
+        ))
+        mgr.confirm_phase(record)
         assert record.current_phase == BrainstormPhase.RELATIONSHIP
 
         # Phase 3
         analyzer = BrainstormAnalyzer()
         analyzer.analyze_relationships(record)
-        mgr.advance_phase(record)
+        mgr.confirm_phase(record)
         assert record.current_phase == BrainstormPhase.INDEPENDENT_REVIEW
 
         # Phase 4: 模拟审查不通过
@@ -155,7 +199,7 @@ class TestBrainstormFullFlow:
         )
 
         # 推进 → CLARIFICATION
-        mgr.advance_phase(record)
+        mgr.confirm_phase(record)
         assert record.current_phase == BrainstormPhase.CLARIFICATION
 
         # 标记需要澄清的节点
@@ -166,7 +210,7 @@ class TestBrainstormFullFlow:
         mgr._process_clarification_response(record, "已补充")
         assert node.status == "exploring"
         node.status = "confirmed"
-        mgr.advance_phase(record)
+        mgr.confirm_phase(record)
         assert record.current_phase == BrainstormPhase.INDEPENDENT_REVIEW
 
     def test_v1_migration_then_continue_v2_flow(self, tmp_path):
@@ -200,11 +244,12 @@ class TestBrainstormFullFlow:
 
         # 可以继续 V2 流程
         fill_product_def(record)
-        mgr.advance_phase(record)
+        mgr.confirm_phase(record)
         # V1 迁移后 current_phase 默认是 feature_decompose，且 topic 节点已 confirmed，
-        # 所以 all_confirmed() 可能直接通过，推进到 relationship
+        # 所以 all_confirmed() 可能直接通过，推进到 deliberation_review 或 relationship
         assert record.current_phase in (
             BrainstormPhase.FEATURE_DECOMPOSE,
+            BrainstormPhase.DELIBERATION_REVIEW,
             BrainstormPhase.RELATIONSHIP,
             BrainstormPhase.PRODUCT_DEF,
         )
